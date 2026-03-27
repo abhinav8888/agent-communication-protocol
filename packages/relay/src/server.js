@@ -64,8 +64,11 @@ function handleMessage(envelope, ws, authToken, registry, auth, router, adminKey
   const respondError = (err) => ({ jsonrpc: '2.0', id, error: err });
 
   if (method === 'agents/register') {
-    if (authToken !== adminKey) {
-      return respondError(createError(ErrorCodes.HMAC_FAILED, 'Admin key required for registration'));
+    // Allow registration with admin key (first time) or known agent secret (reconnection)
+    const isAdmin = authToken === adminKey;
+    const isKnownAgent = registry.isKnownSecret(authToken);
+    if (!isAdmin && !isKnownAgent) {
+      return respondError(createError(ErrorCodes.HMAC_FAILED, 'Admin key or known agent secret required for registration'));
     }
     const { agentCard } = envelope.params;
     const validation = validateAgentCard(agentCard);

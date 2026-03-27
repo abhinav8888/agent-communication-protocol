@@ -63,7 +63,8 @@ export class ConnectionManager {
       if (this.messageQueue.length >= this.maxQueueSize) this.messageQueue.pop();
       return new Promise((resolve, reject) => { this.messageQueue.push({ method, to, params, resolve, reject }); });
     }
-    const secret = method === 'agents/register' ? this.adminKey : this.agentSecret;
+    // Use adminKey for registration if available, otherwise fall back to agentSecret (reconnection)
+    const secret = method === 'agents/register' ? (this.adminKey || this.agentSecret) : this.agentSecret;
     const envelope = createEnvelope({ method, from: this.agentCard.name, to, params, secret });
     return new Promise((resolve, reject) => {
       this.pendingRequests.set(envelope.id, { resolve, reject });
