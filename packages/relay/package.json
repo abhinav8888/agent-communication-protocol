@@ -1,0 +1,17 @@
+{
+  "name": "@agent-protocol/relay",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@agent-protocol/protocol": "1.0.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "vitest": "^3.0.0"
+  }
+}

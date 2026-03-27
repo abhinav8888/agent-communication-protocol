@@ -1,0 +1,13 @@
+{
+  "name": "agent-protocol",
+  "private": true,
+  "workspaces": [
+    "packages/protocol",
+    "packages/relay",
+    "packages/bridge",
+    "packages/cli"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
