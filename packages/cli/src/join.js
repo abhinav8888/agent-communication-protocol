@@ -53,21 +53,30 @@ export const joinCommand = new Command('join')
   });
 
 function configureClaude(homeDir, configPath) {
-  const claudeConfigPath = join(homeDir, '.claude', 'claude_desktop_config.json');
-  let claudeConfig = {};
-  if (existsSync(claudeConfigPath)) {
-    try { claudeConfig = JSON.parse(readFileSync(claudeConfigPath, 'utf8')); } catch { claudeConfig = {}; }
+  // Claude Code CLI uses ~/.claude/settings.json for MCP servers
+  const claudeSettingsPath = join(homeDir, '.claude', 'settings.json');
+  let claudeSettings = {};
+  if (existsSync(claudeSettingsPath)) {
+    try { claudeSettings = JSON.parse(readFileSync(claudeSettingsPath, 'utf8')); } catch { claudeSettings = {}; }
   }
-  if (!claudeConfig.mcpServers) claudeConfig.mcpServers = {};
-  claudeConfig.mcpServers['agent-protocol-bridge'] = {
+  if (!claudeSettings.mcpServers) claudeSettings.mcpServers = {};
+
+  // Resolve the bridge package path relative to this CLI package
+  const bridgeEntryPath = join(homeDir, '.agent-protocol', 'bridge-start.js');
+
+  claudeSettings.mcpServers['agent-protocol-bridge'] = {
     command: 'node',
-    args: [join(homeDir, '.agent-protocol', 'bridge-start.js')],
+    args: [bridgeEntryPath],
     env: { AGENT_PROTOCOL_CONFIG: configPath },
   };
-  mkdirSync(join(homeDir, '.claude'), { recursive: true });
-  writeFileSync(claudeConfigPath, JSON.stringify(claudeConfig, null, 2));
-  console.error(`[agent-protocol] Claude Code MCP server configured at ${claudeConfigPath}`);
 
-  const startScript = `import { startBridge } from '@agent-protocol/bridge';\nstartBridge(process.env.AGENT_PROTOCOL_CONFIG);\n`;
-  writeFileSync(join(homeDir, '.agent-protocol', 'bridge-start.js'), startScript, { mode: 0o600 });
+  mkdirSync(join(homeDir, '.claude'), { recursive: true });
+  writeFileSync(claudeSettingsPath, JSON.stringify(claudeSettings, null, 2));
+  console.error(`[agent-protocol] Claude Code MCP server configured at ${claudeSettingsPath}`);
+
+  // Write bridge start script with absolute path to the bridge package
+  // Use import.meta.resolve-style path so it works regardless of cwd
+  const bridgePkgDir = new URL('../../bridge/src/index.js', import.meta.url).pathname;
+  const startScript = `import { startBridge } from '${bridgePkgDir}';\nstartBridge(process.env.AGENT_PROTOCOL_CONFIG);\n`;
+  writeFileSync(bridgeEntryPath, startScript, { mode: 0o600 });
 }
