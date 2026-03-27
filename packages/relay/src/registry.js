@@ -5,7 +5,18 @@ export class Registry {
     this.knownSecrets = new Map();
   }
   register(card, ws, secret) {
-    if (this.agents.has(card.name)) throw new Error(`Duplicate name: ${card.name}`);
+    if (this.agents.has(card.name)) {
+      // If the same agent reconnects (known secret matches), replace the old connection
+      const existing = this.agents.get(card.name);
+      if (this.knownSecrets.get(card.name) === secret) {
+        // Close old stale connection if still open
+        if (existing.ws.readyState <= 1) existing.ws.close(1001, 'Replaced by reconnection');
+        this.connectionMap.delete(existing.ws);
+        this.agents.delete(card.name);
+      } else {
+        throw new Error(`Duplicate name: ${card.name}`);
+      }
+    }
     const connectedAgents = [...this.agents.keys()];
     this.agents.set(card.name, { card, ws, secret });
     this.connectionMap.set(ws, card.name);
