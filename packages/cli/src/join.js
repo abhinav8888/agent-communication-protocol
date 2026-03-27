@@ -53,26 +53,25 @@ export const joinCommand = new Command('join')
   });
 
 function configureClaude(homeDir, configPath) {
-  // Claude Code CLI uses ~/.claude/settings.json for MCP servers
-  const claudeSettingsPath = join(homeDir, '.claude', 'settings.json');
-  let claudeSettings = {};
-  if (existsSync(claudeSettingsPath)) {
-    try { claudeSettings = JSON.parse(readFileSync(claudeSettingsPath, 'utf8')); } catch { claudeSettings = {}; }
+  // Claude Code uses ~/.claude.json for MCP servers
+  const claudeConfigPath = join(homeDir, '.claude.json');
+  let claudeConfig = {};
+  if (existsSync(claudeConfigPath)) {
+    try { claudeConfig = JSON.parse(readFileSync(claudeConfigPath, 'utf8')); } catch { claudeConfig = {}; }
   }
-  if (!claudeSettings.mcpServers) claudeSettings.mcpServers = {};
+  if (!claudeConfig.mcpServers) claudeConfig.mcpServers = {};
 
   // Resolve the bridge package path relative to this CLI package
   const bridgeEntryPath = join(homeDir, '.agent-protocol', 'bridge-start.js');
 
-  claudeSettings.mcpServers['agent-protocol-bridge'] = {
+  claudeConfig.mcpServers['agent-protocol-bridge'] = {
     command: 'node',
     args: [bridgeEntryPath],
     env: { AGENT_PROTOCOL_CONFIG: configPath },
   };
 
-  mkdirSync(join(homeDir, '.claude'), { recursive: true });
-  writeFileSync(claudeSettingsPath, JSON.stringify(claudeSettings, null, 2));
-  console.error(`[agent-protocol] Claude Code MCP server configured at ${claudeSettingsPath}`);
+  writeFileSync(claudeConfigPath, JSON.stringify(claudeConfig, null, 2));
+  console.error(`[agent-protocol] Claude Code MCP server configured at ${claudeConfigPath}`);
 
   // Write bridge start script with absolute path to the bridge package
   // Use import.meta.resolve-style path so it works regardless of cwd
