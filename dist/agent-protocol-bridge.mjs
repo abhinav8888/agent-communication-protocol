@@ -24979,6 +24979,7 @@ async function doConnect({ relay_url, name, admin_key }) {
         const notif = formatNotification(msg.params);
         pendingNotifications.push(notif);
         writeNotificationToFile(notif);
+        pushChannel(notif, { taskId: msg.params.taskId });
       } else if (msg.method === "tasks/update") {
         try {
           taskTracker.updateSentStatus(msg.params.taskId, msg.params.status);
@@ -24987,6 +24988,7 @@ async function doConnect({ relay_url, name, admin_key }) {
         const notif = formatUpdateNotification(msg.params);
         pendingNotifications.push(notif);
         writeNotificationToFile(notif);
+        pushChannel(notif, { taskId: msg.params.taskId });
       }
     },
     onDisconnect: (code) => {
@@ -25049,7 +25051,25 @@ Task ${params.taskId}: ${params.status}`;
   text += "\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500";
   return text;
 }
-var mcpServer = new McpServer({ name: "agent-protocol-bridge", version: "1.0.0" });
+function pushChannel(text, meta = {}) {
+  try {
+    mcpServer.server.notification({
+      method: "notifications/claude/channel",
+      params: { content: text, meta: { source: "agent-protocol", ...meta } }
+    });
+  } catch {
+  }
+}
+var mcpServer = new McpServer(
+  { name: "agent-protocol-bridge", version: "1.0.0" },
+  {
+    capabilities: {
+      experimental: {
+        "claude/channel": {}
+      }
+    }
+  }
+);
 mcpServer.tool("connect", "Connect to an agent relay server", {
   relay_url: external_exports.string().describe("Relay WebSocket URL (e.g., ws://localhost:8080)"),
   name: external_exports.string().describe("Agent name to register as"),

@@ -54,11 +54,13 @@ async function doConnect({ relay_url, name, admin_key }) {
         const notif = formatNotification(msg.params);
         pendingNotifications.push(notif);
         writeNotificationToFile(notif);
+        pushChannel(notif, { taskId: msg.params.taskId });
       } else if (msg.method === 'tasks/update') {
         try { taskTracker.updateSentStatus(msg.params.taskId, msg.params.status); } catch {}
         const notif = formatUpdateNotification(msg.params);
         pendingNotifications.push(notif);
         writeNotificationToFile(notif);
+        pushChannel(notif, { taskId: msg.params.taskId });
       }
     },
     onDisconnect: (code) => {
@@ -119,9 +121,36 @@ function formatUpdateNotification(params) {
   return text;
 }
 
+// --- Channel push notifications ---
+
+// Sends an MCP server-initiated notification to wake up idle sessions.
+// Uses mcpServer.server (the underlying Protocol/Server instance) which exposes
+// notification() for arbitrary one-way messages. Unknown methods fall through
+// assertNotificationCapability() without error, so no capability flag is required
+// for this to work — but we advertise it in experimental capabilities anyway.
+function pushChannel(text, meta = {}) {
+  try {
+    mcpServer.server.notification({
+      method: 'notifications/claude/channel',
+      params: { content: text, meta: { source: 'agent-protocol', ...meta } },
+    });
+  } catch {
+    // Channel not supported or server not connected — file-based fallback already handled
+  }
+}
+
 // --- MCP Server ---
 
-const mcpServer = new McpServer({ name: 'agent-protocol-bridge', version: '1.0.0' });
+const mcpServer = new McpServer(
+  { name: 'agent-protocol-bridge', version: '1.0.0' },
+  {
+    capabilities: {
+      experimental: {
+        'claude/channel': {},
+      },
+    },
+  }
+);
 
 mcpServer.tool('connect', 'Connect to an agent relay server', {
   relay_url: z.string().describe('Relay WebSocket URL (e.g., ws://localhost:8080)'),
