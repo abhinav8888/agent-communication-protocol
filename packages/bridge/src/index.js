@@ -3,6 +3,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod';
 import { join } from 'node:path';
 import { appendFileSync, mkdirSync } from 'node:fs';
+import { EventEmitter } from 'node:events';
 import { Inbox } from './inbox.js';
 import { TaskTracker } from './tasks.js';
 import { ConnectionManager } from './connection.js';
@@ -16,6 +17,9 @@ function writeNotificationToFile(text) {
   mkdirSync(AP_DIR, { recursive: true });
   appendFileSync(NOTIFICATIONS_FILE, text + '\n', { mode: 0o600 });
 }
+
+// Event emitter for instant wakeup of wait_for_messages
+const messageEvents = new EventEmitter();
 
 // Session state — starts disconnected
 let connection = null;
@@ -54,11 +58,13 @@ async function doConnect({ relay_url, name, admin_key }) {
         const notif = formatNotification(msg.params);
         pendingNotifications.push(notif);
         writeNotificationToFile(notif);
+        messageEvents.emit('message');
       } else if (msg.method === 'tasks/update') {
         try { taskTracker.updateSentStatus(msg.params.taskId, msg.params.status); } catch {}
         const notif = formatUpdateNotification(msg.params);
         pendingNotifications.push(notif);
         writeNotificationToFile(notif);
+        messageEvents.emit('message');
       }
     },
     onDisconnect: (code) => {
@@ -66,6 +72,7 @@ async function doConnect({ relay_url, name, admin_key }) {
         const notif = '[relay disconnected, reconnecting...]';
         pendingNotifications.push(notif);
         writeNotificationToFile(notif);
+        messageEvents.emit('message');
       }
     },
   });
@@ -87,14 +94,21 @@ function requireConnected() {
   }
 }
 
-function wrapHandler(handler) {
+function drainNotifications() {
+  const notifications = pendingNotifications.splice(0);
+  if (notifications.length === 0) return '';
+  return notifications.join('\n\n') + '\n\n---\n\n';
+}
+
+function wrapHandler(handler, { appendWaitInstruction = false } = {}) {
   return async (args) => {
     requireConnected();
     const result = await handler(args);
-    const notifications = pendingNotifications.splice(0);
-    let text = '';
-    if (notifications.length > 0) text = notifications.join('\n\n') + '\n\n---\n\n';
+    let text = drainNotifications();
     text += JSON.stringify(result, null, 2);
+    if (appendWaitInstruction) {
+      text += '\n\n[Now call wait_for_messages to listen for the response.]';
+    }
     return { content: [{ type: 'text', text }] };
   };
 }
@@ -123,6 +137,8 @@ function formatUpdateNotification(params) {
 
 const mcpServer = new McpServer({ name: 'agent-protocol-bridge', version: '1.0.0' });
 
+// -- Connection tools --
+
 mcpServer.tool('connect', 'Connect to an agent relay server', {
   relay_url: z.string().describe('Relay WebSocket URL (e.g., ws://localhost:8080)'),
   name: z.string().describe('Agent name to register as'),
@@ -130,7 +146,9 @@ mcpServer.tool('connect', 'Connect to an agent relay server', {
 }, async (args) => {
   try {
     const result = await doConnect(args);
-    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+    let text = JSON.stringify(result, null, 2);
+    text += '\n\n[SETUP REQUIRED: To receive messages while idle, set up a recurring poll by calling CronCreate with cron "*/1 * * * *" and prompt "call wait_for_messages to check for incoming agent messages". This ensures you are notified of messages even when not actively working.]';
+    return { content: [{ type: 'text', text }] };
   } catch (err) {
     return { content: [{ type: 'text', text: `Connection failed: ${err.message}` }] };
   }
@@ -142,29 +160,70 @@ mcpServer.tool('disconnect', 'Disconnect from the relay server', {}, async () =>
   return { content: [{ type: 'text', text: 'Disconnected.' }] };
 });
 
-mcpServer.tool('list_agents', 'List all connected peer agents', {}, wrapHandler(async () => handlers.list_agents({})));
-mcpServer.tool('discover_agents', 'Find agents by skill tag', { tag: z.string().describe('Skill tag to search for') }, wrapHandler(async (args) => handlers.discover_agents(args)));
+// -- Messaging tools --
+
 mcpServer.tool('send_message', 'Send a message to a specific agent', {
   to: z.string().describe('Target agent name'),
   text: z.string().describe('Message text'),
   data: z.any().optional().describe('Optional structured data to attach'),
-}, wrapHandler(async (args) => handlers.send_message(args)));
+}, wrapHandler(async (args) => handlers.send_message(args), { appendWaitInstruction: true }));
+
 mcpServer.tool('broadcast', 'Send a message to all connected agents', {
   text: z.string().describe('Message text'),
   data: z.any().optional().describe('Optional structured data to attach'),
-}, wrapHandler(async (args) => handlers.broadcast(args)));
-mcpServer.tool('get_messages', 'Get unread messages from other agents', {}, wrapHandler(async () => handlers.get_messages({})));
-mcpServer.tool('get_task_status', 'Check the status of a task', { taskId: z.string().describe('Task ID to check') }, wrapHandler(async (args) => handlers.get_task_status(args)));
+}, wrapHandler(async (args) => handlers.broadcast(args), { appendWaitInstruction: true }));
+
 mcpServer.tool('update_task', 'Update a received task status (working/completed/failed)', {
   taskId: z.string().describe('Task ID to update'),
   status: z.enum(['working', 'completed', 'failed']).describe('New status'),
   text: z.string().optional().describe('Optional response message'),
-}, wrapHandler(async (args) => handlers.update_task(args)));
+}, wrapHandler(async (args) => handlers.update_task(args), { appendWaitInstruction: true }));
+
+// -- Wait for messages (blocking poll) --
+
+mcpServer.tool('wait_for_messages', 'Block until a message arrives from another agent, or timeout. Call this after sending a message or when idle to listen for incoming requests.', {
+  timeout: z.number().optional().default(90).describe('Max seconds to wait (default 90)'),
+}, async (args) => {
+  requireConnected();
+
+  // Check if there are already pending notifications
+  if (pendingNotifications.length > 0) {
+    return { content: [{ type: 'text', text: drainNotifications() }] };
+  }
+
+  const timeout = Math.min(args.timeout ?? 90, 90);
+
+  // Wait for a message event or timeout
+  const result = await new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      messageEvents.removeListener('message', onMessage);
+      resolve(null);
+    }, timeout * 1000);
+
+    function onMessage() {
+      clearTimeout(timer);
+      resolve(true);
+    }
+
+    messageEvents.once('message', onMessage);
+  });
+
+  if (result && pendingNotifications.length > 0) {
+    return { content: [{ type: 'text', text: drainNotifications() }] };
+  }
+
+  return { content: [{ type: 'text', text: 'No messages received. The CronCreate poll will call this again automatically.' }] };
+});
+
+// -- Query tools --
+
+mcpServer.tool('list_agents', 'List all connected peer agents', {}, wrapHandler(async () => handlers.list_agents({})));
+mcpServer.tool('discover_agents', 'Find agents by skill tag', { tag: z.string().describe('Skill tag to search for') }, wrapHandler(async (args) => handlers.discover_agents(args)));
+mcpServer.tool('get_messages', 'Get unread messages from other agents', {}, wrapHandler(async () => handlers.get_messages({})));
+mcpServer.tool('get_task_status', 'Check the status of a task', { taskId: z.string().describe('Task ID to check') }, wrapHandler(async (args) => handlers.get_task_status(args)));
 mcpServer.tool('get_connection_status', 'Check relay connection status', {}, async () => {
   const connected = connection?.isConnected() || false;
-  const notifications = pendingNotifications.splice(0);
-  let text = '';
-  if (notifications.length > 0) text = notifications.join('\n\n') + '\n\n---\n\n';
+  let text = drainNotifications();
   text += JSON.stringify({ connected }, null, 2);
   return { content: [{ type: 'text', text }] };
 });
