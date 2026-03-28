@@ -7,7 +7,14 @@
     "packages/bridge",
     "packages/cli"
   ],
+  "scripts": {
+    "build": "esbuild packages/bridge/src/index.js --bundle --platform=node --format=esm --banner:js=\"import { createRequire } from 'module'; const require = createRequire(import.meta.url);\" --outfile=dist/agent-protocol-bridge.mjs",
+    "build:relay": "esbuild packages/relay/src/server.js --bundle --platform=node --format=esm --banner:js=\"import { createRequire } from 'module'; const require = createRequire(import.meta.url);\" --outfile=dist/agent-protocol-relay.mjs"
+  },
   "engines": {
     "node": ">=18.0.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.27.4"
   }
 }
