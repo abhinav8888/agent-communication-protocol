@@ -24621,6 +24621,7 @@ var StdioServerTransport = class {
 
 // packages/bridge/src/index.js
 import { join as join2 } from "node:path";
+import { appendFileSync, mkdirSync as mkdirSync2 } from "node:fs";
 
 // packages/bridge/src/inbox.js
 import { writeFileSync, readFileSync, readdirSync, unlinkSync, existsSync, mkdirSync } from "node:fs";
@@ -24939,7 +24940,13 @@ function createToolHandlers(connection2, inbox2, taskTracker2) {
 }
 
 // packages/bridge/src/index.js
-var INBOX_BASE = join2(process.env.HOME, ".agent-protocol", "inbox");
+var AP_DIR = join2(process.env.HOME, ".agent-protocol");
+var INBOX_BASE = join2(AP_DIR, "inbox");
+var NOTIFICATIONS_FILE = join2(AP_DIR, "notifications");
+function writeNotificationToFile(text) {
+  mkdirSync2(AP_DIR, { recursive: true });
+  appendFileSync(NOTIFICATIONS_FILE, text + "\n", { mode: 384 });
+}
 var connection = null;
 var inbox = null;
 var taskTracker = new TaskTracker();
@@ -24969,17 +24976,25 @@ async function doConnect({ relay_url, name, admin_key }) {
     onMessage: (msg) => {
       if (msg.method === "tasks/receive") {
         inbox.writeMessage(msg.params);
-        pendingNotifications.push(formatNotification(msg.params));
+        const notif = formatNotification(msg.params);
+        pendingNotifications.push(notif);
+        writeNotificationToFile(notif);
       } else if (msg.method === "tasks/update") {
         try {
           taskTracker.updateSentStatus(msg.params.taskId, msg.params.status);
         } catch {
         }
-        pendingNotifications.push(formatUpdateNotification(msg.params));
+        const notif = formatUpdateNotification(msg.params);
+        pendingNotifications.push(notif);
+        writeNotificationToFile(notif);
       }
     },
     onDisconnect: (code) => {
-      if (code !== 1e3) pendingNotifications.push("[relay disconnected, reconnecting...]");
+      if (code !== 1e3) {
+        const notif = "[relay disconnected, reconnecting...]";
+        pendingNotifications.push(notif);
+        writeNotificationToFile(notif);
+      }
     }
   });
   const result = await connection.connect();

@@ -2,12 +2,20 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import { join } from 'node:path';
+import { appendFileSync, mkdirSync } from 'node:fs';
 import { Inbox } from './inbox.js';
 import { TaskTracker } from './tasks.js';
 import { ConnectionManager } from './connection.js';
 import { createToolHandlers } from './tools.js';
 
-const INBOX_BASE = join(process.env.HOME, '.agent-protocol', 'inbox');
+const AP_DIR = join(process.env.HOME, '.agent-protocol');
+const INBOX_BASE = join(AP_DIR, 'inbox');
+const NOTIFICATIONS_FILE = join(AP_DIR, 'notifications');
+
+function writeNotificationToFile(text) {
+  mkdirSync(AP_DIR, { recursive: true });
+  appendFileSync(NOTIFICATIONS_FILE, text + '\n', { mode: 0o600 });
+}
 
 // Session state — starts disconnected
 let connection = null;
@@ -43,14 +51,22 @@ async function doConnect({ relay_url, name, admin_key }) {
     onMessage: (msg) => {
       if (msg.method === 'tasks/receive') {
         inbox.writeMessage(msg.params);
-        pendingNotifications.push(formatNotification(msg.params));
+        const notif = formatNotification(msg.params);
+        pendingNotifications.push(notif);
+        writeNotificationToFile(notif);
       } else if (msg.method === 'tasks/update') {
         try { taskTracker.updateSentStatus(msg.params.taskId, msg.params.status); } catch {}
-        pendingNotifications.push(formatUpdateNotification(msg.params));
+        const notif = formatUpdateNotification(msg.params);
+        pendingNotifications.push(notif);
+        writeNotificationToFile(notif);
       }
     },
     onDisconnect: (code) => {
-      if (code !== 1000) pendingNotifications.push('[relay disconnected, reconnecting...]');
+      if (code !== 1000) {
+        const notif = '[relay disconnected, reconnecting...]';
+        pendingNotifications.push(notif);
+        writeNotificationToFile(notif);
+      }
     },
   });
 

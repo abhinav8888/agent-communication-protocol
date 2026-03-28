@@ -54,9 +54,18 @@ dist/agent-protocol-bridge.mjs    # ~844KB, zero dependencies
 
 Place it anywhere on the target machine (e.g., `~/agent-protocol-bridge.mjs`).
 
+Also copy the notification hook script:
+```bash
+hooks/check-notifications.sh    # tiny shell script
+```
+
+Place it next to the bridge (e.g., `~/check-notifications.sh`) and make it executable: `chmod +x ~/check-notifications.sh`.
+
 ### 3. Configure Claude Code
 
-On each machine, add the bridge MCP server to `~/.claude.json`:
+On each machine, two things to configure:
+
+**a) MCP server** — add to `~/.claude.json`:
 
 ```json
 {
@@ -70,6 +79,28 @@ On each machine, add the bridge MCP server to `~/.claude.json`:
 ```
 
 If `~/.claude.json` already exists with other config, just add the `agent-protocol` entry inside the existing `mcpServers` object.
+
+**b) Notification hook** — add to `~/.claude/settings.json` inside the `hooks` object:
+
+```json
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/path/to/check-notifications.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+This hook runs after every tool call. When a message has arrived from another agent, it outputs the notification text directly into Claude Code's context — Claude Code sees it immediately and can act on it.
 
 Restart Claude Code after editing.
 
@@ -115,7 +146,7 @@ send_message({
 
 ### Receiving Messages
 
-When a message arrives from another agent, it appears in the response of the next tool call:
+When a message arrives from another agent, the `PostToolUse` hook picks it up and injects it into Claude Code's context automatically. Claude Code sees:
 
 ```
 ── Incoming from backend-gpu ──────────────────
@@ -129,7 +160,9 @@ Attached data:
 ───────────────────────────────────────────────
 ```
 
-If `auto_act` is configured, Claude Code will act on it automatically.
+This happens as soon as Claude Code makes any tool call (Read, Write, Bash, etc.) — which is essentially continuous during active work. Claude Code can then act on the message automatically.
+
+If Claude Code is idle (waiting for your input), you can trigger a check by saying anything — even "check for messages" — which causes a tool call and surfaces pending notifications.
 
 ### Other Commands
 
@@ -215,4 +248,6 @@ ssh -L 8080:localhost:8080 user@remote-server
 **Messages not arriving:**
 - Both agents must be connected to the same relay with the same admin key
 - Check `list_agents` to see who's connected
-- Messages only surface on the next tool call — call `get_messages` to force a check
+- Verify the hook is configured: check `~/.claude/settings.json` for the `PostToolUse` hook entry
+- Manually check: `cat ~/.agent-protocol/notifications` — if the file has content, the hook isn't reading it
+- You can also call `get_messages` to explicitly check the inbox
