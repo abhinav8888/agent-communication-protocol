@@ -6,10 +6,10 @@ import { createEnvelope } from '@agent-protocol/protocol';
 const PORT = 9876;
 const ADMIN_KEY = 'test-admin-key';
 
-function connect(agentSecret) {
+function connect(sessionSecret) {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(`ws://127.0.0.1:${PORT}`, {
-      headers: { Authorization: `Bearer ${agentSecret}` },
+      headers: { Authorization: `Bearer ${sessionSecret}` },
     });
     ws.on('open', () => resolve(ws));
     ws.on('error', reject);
@@ -62,7 +62,7 @@ describe('Relay Server', () => {
     const response = await sendAndWait(ws, envelope);
     expect(response.result.registered).toBe(true);
     expect(response.result.agentName).toBe('agent-a');
-    expect(response.result.agentSecret).toBeDefined();
+    expect(response.result.sessionSecret).toBeDefined();
     ws.close();
   });
 
@@ -71,7 +71,7 @@ describe('Relay Server', () => {
     const wsA = await connect(ADMIN_KEY);
     const regA = createEnvelope({ method: 'agents/register', from: 'agent-a', params: { agentCard: makeCard('agent-a') }, secret: ADMIN_KEY });
     const resA = await sendAndWait(wsA, regA);
-    const secretA = resA.result.agentSecret;
+    const secretA = resA.result.sessionSecret;
 
     const wsB = await connect(ADMIN_KEY);
     const regB = createEnvelope({ method: 'agents/register', from: 'agent-b', params: { agentCard: makeCard('agent-b') }, secret: ADMIN_KEY });
@@ -98,7 +98,7 @@ describe('Relay Server', () => {
     const ws = await connect(ADMIN_KEY);
     const reg = createEnvelope({ method: 'agents/register', from: 'agent-a', params: { agentCard: makeCard('agent-a') }, secret: ADMIN_KEY });
     const res = await sendAndWait(ws, reg);
-    const secret = res.result.agentSecret;
+    const secret = res.result.sessionSecret;
 
     const sendEnv = createEnvelope({
       method: 'tasks/send', from: 'agent-a', to: 'ghost',
@@ -115,7 +115,7 @@ describe('Relay Server', () => {
     const wsA = await connect(ADMIN_KEY);
     const regA = createEnvelope({ method: 'agents/register', from: 'agent-a', params: { agentCard: makeCard('agent-a') }, secret: ADMIN_KEY });
     const resA = await sendAndWait(wsA, regA);
-    const secretA = resA.result.agentSecret;
+    const secretA = resA.result.sessionSecret;
 
     const wsB = await connect(ADMIN_KEY);
     const regB = createEnvelope({ method: 'agents/register', from: 'agent-b', params: { agentCard: makeCard('agent-b') }, secret: ADMIN_KEY });
@@ -133,7 +133,7 @@ describe('Relay Server', () => {
     const wsA = await connect(ADMIN_KEY);
     const regA = createEnvelope({ method: 'agents/register', from: 'agent-a', params: { agentCard: makeCard('agent-a') }, secret: ADMIN_KEY });
     const resA = await sendAndWait(wsA, regA);
-    const secretA = resA.result.agentSecret;
+    const secretA = resA.result.sessionSecret;
 
     const wsB = await connect(ADMIN_KEY);
     const regB = createEnvelope({ method: 'agents/register', from: 'agent-b', params: { agentCard: makeCard('agent-b') }, secret: ADMIN_KEY });

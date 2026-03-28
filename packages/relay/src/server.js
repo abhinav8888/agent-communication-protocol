@@ -10,13 +10,12 @@ export async function createRelayServer({ port, adminKey, rateLimitPerSec = 100,
   const auth = new AuthManager({ timestampWindowSec, rateLimitPerSec });
   const router = new Router(registry);
 
+  // All connections authenticate with admin key
   const wss = new WebSocketServer({ port, verifyClient: ({ req }, cb) => {
     const authHeader = req.headers.authorization;
     if (!authHeader) return cb(false, 1008, 'Auth required');
     const token = authHeader.replace('Bearer ', '');
-    const isAdmin = token === adminKey;
-    const isKnown = registry.isKnownSecret(token);
-    if (!isAdmin && !isKnown) return cb(false, 1008, 'Auth failed');
+    if (token !== adminKey) return cb(false, 1008, 'Auth failed');
     cb(true);
   }});
 
@@ -28,10 +27,9 @@ export async function createRelayServer({ port, adminKey, rateLimitPerSec = 100,
     }
   }, 30000);
 
-  wss.on('connection', (ws, req) => {
+  wss.on('connection', (ws) => {
     ws.isAlive = true;
     ws.on('pong', () => { ws.isAlive = true; });
-    const authToken = req.headers.authorization?.replace('Bearer ', '');
 
     ws.on('message', (data) => {
       const { valid, error, envelope } = parseEnvelope(data.toString());
@@ -39,7 +37,7 @@ export async function createRelayServer({ port, adminKey, rateLimitPerSec = 100,
         ws.send(JSON.stringify({ jsonrpc: '2.0', id: null, error: createError(ErrorCodes.INVALID_REQUEST, error) }));
         return;
       }
-      const response = handleMessage(envelope, ws, authToken, registry, auth, router, adminKey);
+      const response = handleMessage(envelope, ws, registry, auth, router, adminKey);
       if (response) ws.send(JSON.stringify(response));
     });
 
@@ -58,17 +56,15 @@ export async function createRelayServer({ port, adminKey, rateLimitPerSec = 100,
   };
 }
 
-function handleMessage(envelope, ws, authToken, registry, auth, router, adminKey) {
+function handleMessage(envelope, ws, registry, auth, router, adminKey) {
   const { id, method, from, to } = envelope;
   const respond = (result) => ({ jsonrpc: '2.0', id, result });
   const respondError = (err) => ({ jsonrpc: '2.0', id, error: err });
 
+  // Registration: signed with admin key, returns a session secret for HMAC
   if (method === 'agents/register') {
-    // Allow registration with admin key (first time) or known agent secret (reconnection)
-    const isAdmin = authToken === adminKey;
-    const isKnownAgent = registry.isKnownSecret(authToken);
-    if (!isAdmin && !isKnownAgent) {
-      return respondError(createError(ErrorCodes.HMAC_FAILED, 'Admin key or known agent secret required for registration'));
+    if (!auth.verifyEnvelope(envelope, adminKey)) {
+      return respondError(createError(ErrorCodes.HMAC_FAILED, 'Invalid registration signature'));
     }
     const { agentCard } = envelope.params;
     const validation = validateAgentCard(agentCard);
@@ -76,15 +72,16 @@ function handleMessage(envelope, ws, authToken, registry, auth, router, adminKey
       return respondError(createError(ErrorCodes.INVALID_REQUEST, validation.errors.join(', ')));
     }
     try {
-      const agentSecret = registry.knownSecrets.get(agentCard.name) || randomBytes(32).toString('hex');
-      const result = registry.register(agentCard, ws, agentSecret);
+      const sessionSecret = randomBytes(32).toString('hex');
+      const result = registry.register(agentCard, ws, sessionSecret);
       log('register', { agent: agentCard.name });
-      return respond({ ...result, agentSecret });
+      return respond({ ...result, sessionSecret });
     } catch (e) {
       return respondError(createError(ErrorCodes.DUPLICATE_NAME, e.message));
     }
   }
 
+  // All other methods: must be registered, HMAC signed with session secret
   const registeredName = registry.getNameByConnection(ws);
   if (!registeredName) {
     return respondError(createError(ErrorCodes.INVALID_REQUEST, 'Must register first'));
@@ -94,14 +91,14 @@ function handleMessage(envelope, ws, authToken, registry, auth, router, adminKey
     return respondError(createError(ErrorCodes.FROM_MISMATCH, `from "${from}" does not match registered name "${registeredName}"`));
   }
 
-  const secret = registry.getSecret(registeredName);
+  const sessionSecret = registry.getSecret(registeredName);
   if (!auth.checkTimestamp(envelope.timestamp)) {
     return respondError(createError(ErrorCodes.TIMESTAMP_EXPIRED, 'Timestamp outside allowed window'));
   }
   if (!auth.checkReplay(envelope.id)) {
     return respondError(createError(ErrorCodes.REPLAY_DETECTED, 'Duplicate message ID'));
   }
-  if (!auth.verifyEnvelope(envelope, secret)) {
+  if (!auth.verifyEnvelope(envelope, sessionSecret)) {
     log('hmac_failed', { agent: registeredName });
     return respondError(createError(ErrorCodes.HMAC_FAILED, 'HMAC verification failed'));
   }

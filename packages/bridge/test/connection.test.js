@@ -21,7 +21,7 @@ describe('ConnectionManager', () => {
     conn = new ConnectionManager({ relayUrl: `ws://127.0.0.1:${PORT}`, agentCard: makeCard('bridge-test'), adminKey: ADMIN_KEY });
     const result = await conn.connect();
     expect(result.registered).toBe(true);
-    expect(result.agentSecret).toBeDefined();
+    expect(result.sessionSecret).toBeDefined();
     expect(conn.isConnected()).toBe(true);
   });
 

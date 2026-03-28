@@ -24620,7 +24620,6 @@ var StdioServerTransport = class {
 };
 
 // packages/bridge/src/index.js
-import { mkdirSync as mkdirSync2, writeFileSync as writeFileSync2, readFileSync as readFileSync2, existsSync as existsSync2, readdirSync as readdirSync2 } from "node:fs";
 import { join as join2 } from "node:path";
 
 // packages/bridge/src/inbox.js
@@ -24771,11 +24770,11 @@ var wrapper_default = import_websocket.default;
 
 // packages/bridge/src/connection.js
 var ConnectionManager = class {
-  constructor({ relayUrl, agentCard, adminKey, agentSecret, onMessage, onDisconnect }) {
+  constructor({ relayUrl, agentCard, adminKey, onMessage, onDisconnect }) {
     this.relayUrl = relayUrl;
     this.agentCard = agentCard;
     this.adminKey = adminKey;
-    this.agentSecret = agentSecret || null;
+    this.sessionSecret = null;
     this.onMessage = onMessage || (() => {
     });
     this.onDisconnect = onDisconnect || (() => {
@@ -24791,13 +24790,12 @@ var ConnectionManager = class {
     }
   }
   async connect() {
-    const authToken = this.agentSecret || this.adminKey;
     return new Promise((resolve, reject) => {
-      this.ws = new wrapper_default(this.relayUrl, { headers: { Authorization: `Bearer ${authToken}` } });
+      this.ws = new wrapper_default(this.relayUrl, { headers: { Authorization: `Bearer ${this.adminKey}` } });
       this.ws.on("open", async () => {
         try {
           const result = await this._register();
-          if (result.agentSecret) this.agentSecret = result.agentSecret;
+          if (result.sessionSecret) this.sessionSecret = result.sessionSecret;
           this._shouldReconnect = true;
           resolve(result);
         } catch (err) {
@@ -24816,6 +24814,7 @@ var ConnectionManager = class {
         this.onMessage(msg);
       });
       this.ws.on("close", (code) => {
+        this.sessionSecret = null;
         if (this._shouldReconnect && code !== 1e3 && code !== 1008 && code !== 4001) this._reconnect();
         this.onDisconnect(code);
       });
@@ -24834,7 +24833,7 @@ var ConnectionManager = class {
         this.messageQueue.push({ method, to, params, resolve, reject });
       });
     }
-    const secret = method === "agents/register" ? this.adminKey || this.agentSecret : this.agentSecret;
+    const secret = method === "agents/register" ? this.adminKey : this.sessionSecret;
     const envelope = createEnvelope({ method, from: this.agentCard.name, to, params, secret });
     return new Promise((resolve, reject) => {
       this.pendingRequests.set(envelope.id, { resolve, reject });
@@ -24880,6 +24879,7 @@ var ConnectionManager = class {
   }
   async disconnect() {
     this._shouldReconnect = false;
+    this.sessionSecret = null;
     if (this.ws) {
       this.ws.close(1e3);
       this.ws = null;
@@ -24939,7 +24939,6 @@ function createToolHandlers(connection2, inbox2, taskTracker2) {
 }
 
 // packages/bridge/src/index.js
-var PROFILES_DIR = join2(process.env.HOME, ".agent-protocol", "profiles");
 var INBOX_BASE = join2(process.env.HOME, ".agent-protocol", "inbox");
 var connection = null;
 var inbox = null;
@@ -24947,19 +24946,7 @@ var taskTracker = new TaskTracker();
 var handlers = null;
 var cleanupInterval = null;
 var pendingNotifications = [];
-function getProfilePath(name) {
-  return join2(PROFILES_DIR, `${name}.json`);
-}
-function saveProfile(name, data) {
-  mkdirSync2(PROFILES_DIR, { recursive: true, mode: 448 });
-  writeFileSync2(getProfilePath(name), JSON.stringify(data, null, 2), { mode: 384 });
-}
-function loadProfile(name) {
-  const p = getProfilePath(name);
-  if (!existsSync2(p)) return null;
-  return JSON.parse(readFileSync2(p, "utf8"));
-}
-async function doConnect({ relay_url, name, admin_key, secret, skills }) {
+async function doConnect({ relay_url, name, admin_key }) {
   if (connection && connection.isConnected()) {
     await connection.disconnect();
   }
@@ -24969,18 +24956,16 @@ async function doConnect({ relay_url, name, admin_key, secret, skills }) {
     version: "1.0.0",
     protocolVersion: "1.0",
     capabilities: { streaming: false, pushNotifications: true },
-    skills: skills || [{ id: "general", name: "General", description: "General agent", tags: ["general"] }],
+    skills: [{ id: "general", name: "General", description: "General agent", tags: ["general"] }],
     defaultInputModes: ["text/plain", "application/json"],
     defaultOutputModes: ["text/plain", "application/json"]
   };
-  const inboxDir = join2(INBOX_BASE, name);
-  inbox = new Inbox(inboxDir);
+  inbox = new Inbox(join2(INBOX_BASE, name));
   taskTracker = new TaskTracker();
   connection = new ConnectionManager({
     relayUrl: relay_url,
     agentCard,
-    adminKey: admin_key || void 0,
-    agentSecret: secret || void 0,
+    adminKey: admin_key,
     onMessage: (msg) => {
       if (msg.method === "tasks/receive") {
         inbox.writeMessage(msg.params);
@@ -24998,28 +24983,16 @@ async function doConnect({ relay_url, name, admin_key, secret, skills }) {
     }
   });
   const result = await connection.connect();
-  saveProfile(name, {
-    relay_url,
-    name,
-    agent_secret: result.agentSecret || secret,
-    skills: agentCard.skills
-  });
   handlers = createToolHandlers(connection, inbox, taskTracker);
   if (cleanupInterval) clearInterval(cleanupInterval);
   cleanupInterval = setInterval(() => {
     inbox.cleanup({ completed_ttl_minutes: 60, stale_ttl_hours: 24 });
   }, 60 * 60 * 1e3);
-  return {
-    connected: true,
-    agent_name: name,
-    relay_url,
-    connected_agents: result.connectedAgents || [],
-    profile_saved: getProfilePath(name)
-  };
+  return { connected: true, agent_name: name, relay_url, connected_agents: result.connectedAgents || [] };
 }
 function requireConnected() {
   if (!connection || !connection.isConnected()) {
-    throw new Error('Not connected. Use the "connect" tool first with relay_url, name, and admin_key or secret.');
+    throw new Error('Not connected. Use the "connect" tool first with relay_url, name, and admin_key.');
   }
 }
 function wrapHandler(handler) {
@@ -25059,47 +25032,24 @@ Task ${params.taskId}: ${params.status}`;
   return text;
 }
 var mcpServer = new McpServer({ name: "agent-protocol-bridge", version: "1.0.0" });
-mcpServer.tool(
-  "connect",
-  "Connect to a relay server. Use profile OR (relay_url + name + admin_key/secret). First time: provide admin_key. Reconnect: provide secret or use profile.",
-  {
-    profile: external_exports.string().optional().describe('Saved profile name (e.g., "backend-gpu"). Loads relay_url, name, and secret from ~/.agent-protocol/profiles/<name>.json'),
-    relay_url: external_exports.string().optional().describe("Relay server WebSocket URL (e.g., ws://localhost:8080)"),
-    name: external_exports.string().optional().describe("Agent name to register as"),
-    admin_key: external_exports.string().optional().describe("Relay admin key (for first-time registration)"),
-    secret: external_exports.string().optional().describe("Agent secret (for reconnection, saved in profile after first connect)")
-  },
-  async (args) => {
-    try {
-      let connectArgs;
-      if (args.profile) {
-        const profile = loadProfile(args.profile);
-        if (!profile) {
-          return { content: [{ type: "text", text: `Profile "${args.profile}" not found. Available profiles: ${listProfilesSync().join(", ") || "none"}` }] };
-        }
-        connectArgs = {
-          relay_url: args.relay_url || profile.relay_url,
-          name: profile.name,
-          secret: profile.agent_secret,
-          skills: profile.skills
-        };
-      } else if (args.relay_url && args.name) {
-        connectArgs = {
-          relay_url: args.relay_url,
-          name: args.name,
-          admin_key: args.admin_key,
-          secret: args.secret
-        };
-      } else {
-        return { content: [{ type: "text", text: "Provide either { profile } or { relay_url, name, admin_key/secret }. Available profiles: " + listProfilesSync().join(", ") }] };
-      }
-      const result = await doConnect(connectArgs);
-      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-    } catch (err) {
-      return { content: [{ type: "text", text: `Connection failed: ${err.message}` }] };
-    }
+mcpServer.tool("connect", "Connect to an agent relay server", {
+  relay_url: external_exports.string().describe("Relay WebSocket URL (e.g., ws://localhost:8080)"),
+  name: external_exports.string().describe("Agent name to register as"),
+  admin_key: external_exports.string().describe("Relay admin key")
+}, async (args) => {
+  try {
+    const result = await doConnect(args);
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+  } catch (err) {
+    return { content: [{ type: "text", text: `Connection failed: ${err.message}` }] };
   }
-);
+});
+mcpServer.tool("disconnect", "Disconnect from the relay server", {}, async () => {
+  if (connection) await connection.disconnect();
+  connection = null;
+  handlers = null;
+  return { content: [{ type: "text", text: "Disconnected." }] };
+});
 mcpServer.tool("list_agents", "List all connected peer agents", {}, wrapHandler(async () => handlers.list_agents({})));
 mcpServer.tool("discover_agents", "Find agents by skill tag", { tag: external_exports.string().describe("Skill tag to search for") }, wrapHandler(async (args) => handlers.discover_agents(args)));
 mcpServer.tool("send_message", "Send a message to a specific agent", {
@@ -25118,20 +25068,13 @@ mcpServer.tool("update_task", "Update a received task status (working/completed/
   status: external_exports.enum(["working", "completed", "failed"]).describe("New status"),
   text: external_exports.string().optional().describe("Optional response message")
 }, wrapHandler(async (args) => handlers.update_task(args)));
-mcpServer.tool("get_connection_status", "Check connection to relay server", {}, async () => {
+mcpServer.tool("get_connection_status", "Check relay connection status", {}, async () => {
   const connected = connection?.isConnected() || false;
   const notifications = pendingNotifications.splice(0);
   let text = "";
   if (notifications.length > 0) text = notifications.join("\n\n") + "\n\n---\n\n";
-  text += JSON.stringify({ connected, profiles: listProfilesSync() }, null, 2);
+  text += JSON.stringify({ connected }, null, 2);
   return { content: [{ type: "text", text }] };
 });
-function listProfilesSync() {
-  try {
-    return readdirSync2(PROFILES_DIR).filter((f) => f.endsWith(".json")).map((f) => f.replace(".json", ""));
-  } catch {
-    return [];
-  }
-}
 var transport = new StdioServerTransport();
 await mcpServer.connect(transport);

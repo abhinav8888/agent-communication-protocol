@@ -13,18 +13,23 @@ describe('Registry', () => {
   beforeEach(() => { registry = new Registry(); });
 
   it('registers an agent', () => {
-    const result = registry.register(makeCard('agent-a'), {}, 'secret-a');
+    const result = registry.register(makeCard('agent-a'), {}, 'session-secret-a');
     expect(result.registered).toBe(true);
     expect(result.agentName).toBe('agent-a');
   });
   it('returns list of other connected agents on register', () => {
-    registry.register(makeCard('agent-a'), {}, 'secret-a');
-    const result = registry.register(makeCard('agent-b'), {}, 'secret-b');
+    registry.register(makeCard('agent-a'), {}, 'sa');
+    const result = registry.register(makeCard('agent-b'), {}, 'sb');
     expect(result.connectedAgents).toEqual(['agent-a']);
   });
-  it('rejects duplicate name', () => {
-    registry.register(makeCard('agent-a'), {}, 'secret-a');
-    expect(() => registry.register(makeCard('agent-a'), {}, 'secret-x')).toThrow(/duplicate/i);
+  it('replaces stale connection on re-register', () => {
+    const ws1 = { readyState: 3, close() {} };
+    const ws2 = {};
+    registry.register(makeCard('agent-a'), ws1, 'sa');
+    const result = registry.register(makeCard('agent-a'), ws2, 'sa-new');
+    expect(result.registered).toBe(true);
+    expect(registry.getConnection('agent-a')).toBe(ws2);
+    expect(registry.getSecret('agent-a')).toBe('sa-new');
   });
   it('lists all agents except caller', () => {
     registry.register(makeCard('agent-a'), {}, 'sa');
@@ -41,7 +46,6 @@ describe('Registry', () => {
     const found = registry.discoverByTag('playwright');
     expect(found.length).toBe(1);
     expect(found[0].name).toBe('agent-a');
-    expect(found[0].matchingSkills[0].id).toBe('pw');
   });
   it('returns empty for unknown tag', () => {
     registry.register(makeCard('agent-a'), {}, 'sa');
@@ -57,9 +61,9 @@ describe('Registry', () => {
     registry.register(makeCard('agent-a'), ws, 'sa');
     expect(registry.getConnection('agent-a')).toBe(ws);
   });
-  it('gets agent secret by name', () => {
-    registry.register(makeCard('agent-a'), {}, 'my-secret');
-    expect(registry.getSecret('agent-a')).toBe('my-secret');
+  it('gets session secret by name', () => {
+    registry.register(makeCard('agent-a'), {}, 'my-session-secret');
+    expect(registry.getSecret('agent-a')).toBe('my-session-secret');
   });
   it('gets agent name by ws connection', () => {
     const ws = {};

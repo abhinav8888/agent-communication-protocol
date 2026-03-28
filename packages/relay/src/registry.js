@@ -1,36 +1,30 @@
 export class Registry {
   constructor() {
-    this.agents = new Map();
-    this.connectionMap = new Map();
-    this.knownSecrets = new Map();
+    this.agents = new Map();       // name -> { card, ws, secret }
+    this.connectionMap = new Map(); // ws -> name
   }
+
   register(card, ws, secret) {
     if (this.agents.has(card.name)) {
-      // If the same agent reconnects (known secret matches), replace the old connection
+      // Replace stale connection on reconnection
       const existing = this.agents.get(card.name);
-      if (this.knownSecrets.get(card.name) === secret) {
-        // Close old stale connection if still open
+      if (existing.ws !== ws) {
         if (existing.ws.readyState <= 1) existing.ws.close(1001, 'Replaced by reconnection');
         this.connectionMap.delete(existing.ws);
-        this.agents.delete(card.name);
-      } else {
-        throw new Error(`Duplicate name: ${card.name}`);
       }
+      this.agents.delete(card.name);
     }
     const connectedAgents = [...this.agents.keys()];
     this.agents.set(card.name, { card, ws, secret });
     this.connectionMap.set(ws, card.name);
-    this.knownSecrets.set(card.name, secret);
     return { registered: true, agentName: card.name, connectedAgents };
   }
+
   unregister(name) {
     const entry = this.agents.get(name);
     if (entry) { this.connectionMap.delete(entry.ws); this.agents.delete(name); }
   }
-  isKnownSecret(secret) {
-    for (const [, s] of this.knownSecrets) { if (s === secret) return true; }
-    return false;
-  }
+
   listAgents(excludeName) {
     const result = [];
     for (const [name, { card }] of this.agents) {
@@ -39,6 +33,7 @@ export class Registry {
     }
     return result;
   }
+
   discoverByTag(tag) {
     const result = [];
     for (const [, { card }] of this.agents) {
@@ -47,9 +42,11 @@ export class Registry {
     }
     return result;
   }
+
   getConnection(name) { return this.agents.get(name)?.ws ?? null; }
   getSecret(name) { return this.agents.get(name)?.secret ?? null; }
   getNameByConnection(ws) { return this.connectionMap.get(ws) ?? null; }
+
   getAllConnectionsExcept(excludeName) {
     const result = [];
     for (const [name, { ws }] of this.agents) { if (name !== excludeName) result.push({ name, ws }); }

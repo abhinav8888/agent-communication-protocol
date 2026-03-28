@@ -2,11 +2,11 @@ import WebSocket from 'ws';
 import { createEnvelope } from '@agent-protocol/protocol';
 
 export class ConnectionManager {
-  constructor({ relayUrl, agentCard, adminKey, agentSecret, onMessage, onDisconnect }) {
+  constructor({ relayUrl, agentCard, adminKey, onMessage, onDisconnect }) {
     this.relayUrl = relayUrl;
     this.agentCard = agentCard;
     this.adminKey = adminKey;
-    this.agentSecret = agentSecret || null;
+    this.sessionSecret = null; // set after registration
     this.onMessage = onMessage || (() => {});
     this.onDisconnect = onDisconnect || (() => {});
     this.ws = null;
@@ -22,14 +22,14 @@ export class ConnectionManager {
   }
 
   async connect() {
-    const authToken = this.agentSecret || this.adminKey;
     return new Promise((resolve, reject) => {
-      this.ws = new WebSocket(this.relayUrl, { headers: { Authorization: `Bearer ${authToken}` } });
+      // Always authenticate with admin key
+      this.ws = new WebSocket(this.relayUrl, { headers: { Authorization: `Bearer ${this.adminKey}` } });
 
       this.ws.on('open', async () => {
         try {
           const result = await this._register();
-          if (result.agentSecret) this.agentSecret = result.agentSecret;
+          if (result.sessionSecret) this.sessionSecret = result.sessionSecret;
           this._shouldReconnect = true;
           resolve(result);
         } catch (err) { reject(err); }
@@ -48,6 +48,7 @@ export class ConnectionManager {
       });
 
       this.ws.on('close', (code) => {
+        this.sessionSecret = null; // session secret is invalidated on disconnect
         if (this._shouldReconnect && code !== 1000 && code !== 1008 && code !== 4001) this._reconnect();
         this.onDisconnect(code);
       });
@@ -56,15 +57,18 @@ export class ConnectionManager {
     });
   }
 
-  async _register() { return this.sendRequest('agents/register', undefined, { agentCard: this.agentCard }); }
+  async _register() {
+    // Registration is signed with admin key
+    return this.sendRequest('agents/register', undefined, { agentCard: this.agentCard });
+  }
 
   async sendRequest(method, to, params) {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       if (this.messageQueue.length >= this.maxQueueSize) this.messageQueue.pop();
       return new Promise((resolve, reject) => { this.messageQueue.push({ method, to, params, resolve, reject }); });
     }
-    // Use adminKey for registration if available, otherwise fall back to agentSecret (reconnection)
-    const secret = method === 'agents/register' ? (this.adminKey || this.agentSecret) : this.agentSecret;
+    // Registration uses admin key, all other messages use session secret
+    const secret = method === 'agents/register' ? this.adminKey : this.sessionSecret;
     const envelope = createEnvelope({ method, from: this.agentCard.name, to, params, secret });
     return new Promise((resolve, reject) => {
       this.pendingRequests.set(envelope.id, { resolve, reject });
@@ -102,6 +106,7 @@ export class ConnectionManager {
 
   async disconnect() {
     this._shouldReconnect = false;
+    this.sessionSecret = null;
     if (this.ws) { this.ws.close(1000); this.ws = null; }
   }
 }
