@@ -147,7 +147,15 @@ mcpServer.tool('connect', 'Connect to an agent relay server', {
   try {
     const result = await doConnect(args);
     let text = JSON.stringify(result, null, 2);
-    text += '\n\n[SETUP REQUIRED: To receive messages while idle, set up a recurring poll by calling CronCreate with cron "*/2 * * * *" and prompt "call check_messages to check for incoming agent messages". Remember the returned job ID so you can stop it later with CronDelete when disconnecting.]';
+    text += `\n\n[SETUP REQUIRED: Spawn a background subagent to listen for incoming messages. Use the Agent tool with this prompt:
+
+"You are a message listener for agent-protocol. Your job:
+1. First, set up a fallback: call CronCreate with cron \\"*/2 * * * *\\" and prompt \\"call check_messages to check for incoming agent messages\\". Save the returned job ID.
+2. Then loop: call wait_for_messages with max_wait 300 (5 minutes). If it returns a message, report it back and exit. If it times out, call wait_for_messages again.
+3. If you need to stop, call CronDelete with the saved job ID first.
+Do not do anything else. Do not respond to the user. Just listen."
+
+This keeps the main conversation context clean while listening for messages in the background.]`;
     return { content: [{ type: 'text', text }] };
   } catch (err) {
     return { content: [{ type: 'text', text: `Connection failed: ${err.message}` }] };
@@ -157,7 +165,7 @@ mcpServer.tool('connect', 'Connect to an agent relay server', {
 mcpServer.tool('disconnect', 'Disconnect from the relay server', {}, async () => {
   if (connection) await connection.disconnect();
   connection = null; handlers = null;
-  return { content: [{ type: 'text', text: 'Disconnected.\n\n[CLEANUP REQUIRED: Stop the message polling cron job by calling CronDelete with the job ID from when you set up CronCreate. If you don\'t remember the ID, call CronList first to find it, then delete the agent-protocol polling job.]' }] };
+  return { content: [{ type: 'text', text: 'Disconnected.\n\n[CLEANUP REQUIRED: The message listener subagent and its CronCreate job should stop automatically. If not, call CronList to find any agent-protocol polling jobs and CronDelete them.]' }] };
 });
 
 // -- Messaging tools --
@@ -191,8 +199,8 @@ mcpServer.tool('check_messages', 'Check for pending messages from other agents. 
 
 // -- wait_for_messages: blocking, used after send/update --
 
-mcpServer.tool('wait_for_messages', 'Block until a message arrives from another agent, or timeout. Call this after sending a message to wait for the reply.', {
-  timeout: z.number().optional().default(90).describe('Max seconds to wait (default 90)'),
+mcpServer.tool('wait_for_messages', 'Block until a message arrives from another agent. Loops internally — only returns when a message is received or max time is reached. Call this after sending a message to wait for the reply.', {
+  max_wait: z.number().optional().default(1800).describe('Max total seconds to wait (default 1800 = 30 minutes)'),
 }, async (args) => {
   requireConnected();
 
@@ -201,25 +209,39 @@ mcpServer.tool('wait_for_messages', 'Block until a message arrives from another 
     return { content: [{ type: 'text', text: drainNotifications() }] };
   }
 
-  const timeout = Math.min(args.timeout ?? 90, 90);
+  const maxWait = (args.max_wait ?? 1800) * 1000;
+  const started = Date.now();
 
-  // Block until a message event or timeout
-  const result = await new Promise((resolve) => {
-    const timer = setTimeout(() => {
-      messageEvents.removeListener('message', onMessage);
-      resolve(null);
-    }, timeout * 1000);
+  // Loop internally — no repeated LLM calls
+  while (Date.now() - started < maxWait) {
+    const remaining = maxWait - (Date.now() - started);
+    if (remaining <= 0) break;
 
-    function onMessage() {
-      clearTimeout(timer);
-      resolve(true);
+    // Wait up to 90s per cycle, or remaining time, whichever is shorter
+    const cycleTimeout = Math.min(90 * 1000, remaining);
+
+    const arrived = await new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        messageEvents.removeListener('message', onMsg);
+        resolve(false);
+      }, cycleTimeout);
+
+      function onMsg() {
+        clearTimeout(timer);
+        resolve(true);
+      }
+
+      messageEvents.once('message', onMsg);
+    });
+
+    if (arrived && pendingNotifications.length > 0) {
+      return { content: [{ type: 'text', text: drainNotifications() }] };
     }
 
-    messageEvents.once('message', onMessage);
-  });
-
-  if (result && pendingNotifications.length > 0) {
-    return { content: [{ type: 'text', text: drainNotifications() }] };
+    // Check if connection dropped
+    if (!connection || !connection.isConnected()) {
+      return { content: [{ type: 'text', text: 'Connection lost while waiting for messages.' }] };
+    }
   }
 
   return { content: [{ type: 'text', text: 'No messages received within timeout.' }] };
