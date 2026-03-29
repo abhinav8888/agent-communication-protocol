@@ -147,7 +147,7 @@ mcpServer.tool('connect', 'Connect to an agent relay server', {
   try {
     const result = await doConnect(args);
     let text = JSON.stringify(result, null, 2);
-    text += '\n\n[SETUP REQUIRED: To receive messages while idle, set up a recurring poll by calling CronCreate with cron "*/1 * * * *" and prompt "call wait_for_messages to check for incoming agent messages". Remember the returned job ID so you can stop it later with CronDelete when disconnecting.]';
+    text += '\n\n[SETUP REQUIRED: To receive messages while idle, set up a recurring poll by calling CronCreate with cron "*/2 * * * *" and prompt "call check_messages to check for incoming agent messages". Remember the returned job ID so you can stop it later with CronDelete when disconnecting.]';
     return { content: [{ type: 'text', text }] };
   } catch (err) {
     return { content: [{ type: 'text', text: `Connection failed: ${err.message}` }] };
@@ -179,21 +179,31 @@ mcpServer.tool('update_task', 'Update a received task status (working/completed/
   text: z.string().optional().describe('Optional response message'),
 }, wrapHandler(async (args) => handlers.update_task(args), { appendWaitInstruction: true }));
 
-// -- Wait for messages (blocking poll) --
+// -- check_messages: non-blocking, used by cron --
 
-mcpServer.tool('wait_for_messages', 'Block until a message arrives from another agent, or timeout. Call this after sending a message or when idle to listen for incoming requests.', {
+mcpServer.tool('check_messages', 'Check for pending messages from other agents. Non-blocking — returns immediately. Used by the CronCreate polling job.', {}, async () => {
+  requireConnected();
+  if (pendingNotifications.length > 0) {
+    return { content: [{ type: 'text', text: drainNotifications() }] };
+  }
+  return { content: [{ type: 'text', text: 'No new messages.' }] };
+});
+
+// -- wait_for_messages: blocking, used after send/update --
+
+mcpServer.tool('wait_for_messages', 'Block until a message arrives from another agent, or timeout. Call this after sending a message to wait for the reply.', {
   timeout: z.number().optional().default(90).describe('Max seconds to wait (default 90)'),
 }, async (args) => {
   requireConnected();
 
-  // Check if there are already pending notifications
+  // Return immediately if messages are already pending
   if (pendingNotifications.length > 0) {
     return { content: [{ type: 'text', text: drainNotifications() }] };
   }
 
   const timeout = Math.min(args.timeout ?? 90, 90);
 
-  // Wait for a message event or timeout
+  // Block until a message event or timeout
   const result = await new Promise((resolve) => {
     const timer = setTimeout(() => {
       messageEvents.removeListener('message', onMessage);
@@ -212,7 +222,7 @@ mcpServer.tool('wait_for_messages', 'Block until a message arrives from another 
     return { content: [{ type: 'text', text: drainNotifications() }] };
   }
 
-  return { content: [{ type: 'text', text: 'No messages received. The CronCreate poll will call this again automatically.' }] };
+  return { content: [{ type: 'text', text: 'No messages received within timeout.' }] };
 });
 
 // -- Query tools --
