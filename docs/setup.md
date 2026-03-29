@@ -20,7 +20,19 @@ Claude Code A ←→ Bridge (MCP) ←→ Relay Server ←→ Bridge (MCP) ←→
 
 ## Setup
 
-### 1. Start the Relay Server
+### 1. Build the Bundle (one time, after code changes)
+
+From the project root:
+
+```bash
+cd /path/to/agent-protocol
+npm install
+npm run build
+```
+
+This produces `dist/agent-protocol-bridge.mjs` (~844KB, zero dependencies). Rebuild after any code changes.
+
+### 2. Start the Relay Server
 
 On any machine reachable by all agents:
 
@@ -42,7 +54,7 @@ You can also provide your own key:
 node packages/cli/src/index.js relay --port 8080 --admin-key my-secret-key
 ```
 
-### 2. Install the Bridge on Each Machine
+### 3. Install the Bridge on Each Machine
 
 Copy a single file to each machine that will run Claude Code:
 
@@ -53,7 +65,7 @@ dist/agent-protocol-bridge.mjs    # ~844KB, zero dependencies, just needs Node.j
 
 Place it anywhere on the target machine (e.g., `~/agent-protocol-bridge.mjs`).
 
-### 3. Configure Claude Code
+### 4. Configure Claude Code
 
 On each machine, add the bridge MCP server to `~/.claude.json`:
 
@@ -72,7 +84,7 @@ If `~/.claude.json` already exists with other config, just add the `agent-protoc
 
 Restart Claude Code after editing.
 
-### 4. Verify
+### 5. Verify
 
 In Claude Code, run `/mcp` — you should see `agent-protocol` with status `Connected`.
 
