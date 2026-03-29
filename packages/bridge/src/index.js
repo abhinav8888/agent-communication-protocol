@@ -150,9 +150,9 @@ mcpServer.tool('connect', 'Connect to an agent relay server', {
     text += `\n\n[SETUP REQUIRED: Spawn a background subagent to listen for incoming messages. Use the Agent tool with this prompt:
 
 "You are a message listener for agent-protocol. Your job:
-1. First, set up a fallback: call CronCreate with cron \\"*/2 * * * *\\" and prompt \\"call check_messages to check for incoming agent messages\\". Save the returned job ID.
-2. Then loop: call wait_for_messages with max_wait 300 (5 minutes). If it returns a message, report it back and exit. If it times out, call wait_for_messages again.
-3. If you need to stop, call CronDelete with the saved job ID first.
+1. Call wait_for_messages with max_wait 300 (5 minutes).
+2. If it returns a message, report it back and exit.
+3. If it times out with no messages, call wait_for_messages again.
 Do not do anything else. Do not respond to the user. Just listen."
 
 This keeps the main conversation context clean while listening for messages in the background.]`;
@@ -165,7 +165,7 @@ This keeps the main conversation context clean while listening for messages in t
 mcpServer.tool('disconnect', 'Disconnect from the relay server', {}, async () => {
   if (connection) await connection.disconnect();
   connection = null; handlers = null;
-  return { content: [{ type: 'text', text: 'Disconnected.\n\n[CLEANUP REQUIRED: The message listener subagent and its CronCreate job should stop automatically. If not, call CronList to find any agent-protocol polling jobs and CronDelete them.]' }] };
+  return { content: [{ type: 'text', text: 'Disconnected. The message listener subagent will stop on its next poll when it detects the connection is lost.' }] };
 });
 
 // -- Messaging tools --
