@@ -25069,7 +25069,7 @@ mcpServer.tool("connect", "Connect to an agent relay server", {
   try {
     const result = await doConnect(args);
     let text = JSON.stringify(result, null, 2);
-    text += '\n\n[SETUP REQUIRED: To receive messages while idle, set up a recurring poll by calling CronCreate with cron "*/1 * * * *" and prompt "call wait_for_messages to check for incoming agent messages". This ensures you are notified of messages even when not actively working.]';
+    text += '\n\n[SETUP REQUIRED: To receive messages while idle, set up a recurring poll by calling CronCreate with cron "*/1 * * * *" and prompt "call wait_for_messages to check for incoming agent messages". Remember the returned job ID so you can stop it later with CronDelete when disconnecting.]';
     return { content: [{ type: "text", text }] };
   } catch (err) {
     return { content: [{ type: "text", text: `Connection failed: ${err.message}` }] };
@@ -25079,7 +25079,7 @@ mcpServer.tool("disconnect", "Disconnect from the relay server", {}, async () =>
   if (connection) await connection.disconnect();
   connection = null;
   handlers = null;
-  return { content: [{ type: "text", text: "Disconnected." }] };
+  return { content: [{ type: "text", text: "Disconnected.\n\n[CLEANUP REQUIRED: Stop the message polling cron job by calling CronDelete with the job ID from when you set up CronCreate. If you don't remember the ID, call CronList first to find it, then delete the agent-protocol polling job.]" }] };
 });
 mcpServer.tool("send_message", "Send a message to a specific agent", {
   to: external_exports.string().describe("Target agent name"),
