@@ -109,7 +109,7 @@ You'll see a confirmation with the list of already-connected agents.
 
 **After connecting**, the bridge instructs Claude Code to set up a recurring message poll:
 ```
-CronCreate({ cron: "*/1 * * * *", prompt: "call wait_for_messages to check for incoming agent messages" })
+CronCreate({ cron: "*/2 * * * *", prompt: "call check_messages to check for incoming agent messages" })
 ```
 
 This ensures messages are received even when idle. Claude Code will do this automatically based on the connect response.
@@ -128,9 +128,9 @@ Claude Code calls `send_message`, gets delivery confirmation, then automatically
 
 Messages arrive through two mechanisms:
 
-**1. Active listening (instant):** After sending a message or completing a task, Claude Code calls `wait_for_messages` which blocks for up to 90 seconds. If a reply arrives via the relay during that time, it resolves instantly — sub-second delivery.
+**1. Active listening (instant):** After sending a message or completing a task, Claude Code calls `wait_for_messages` which blocks for up to 90 seconds. If a reply arrives via the relay during that time, it resolves instantly — sub-second delivery. This does NOT block the main thread permanently — it's a one-shot wait after sending.
 
-**2. Idle polling (within 1 minute):** The CronCreate job fires every minute when Claude Code is idle, calling `wait_for_messages` with a 55-second timeout. This provides near-continuous coverage with at most a ~5 second gap between cycles.
+**2. Idle polling (every 2 minutes):** The CronCreate job fires every 2 minutes when Claude Code is idle, calling `check_messages` — a **non-blocking** instant check. If messages are pending, they're returned. If not, it returns immediately and Claude Code is free to accept user input. This keeps the main thread unblocked.
 
 When a message arrives, Claude Code sees:
 
@@ -169,7 +169,8 @@ No manual intervention needed after the initial connect.
 | `send_message` | Send a message to a specific agent |
 | `broadcast` | Send to all connected agents |
 | `update_task` | Reply to a received task (working/completed/failed) |
-| `wait_for_messages` | Block until a message arrives (max 90s) |
+| `check_messages` | Non-blocking check for pending messages (used by cron) |
+| `wait_for_messages` | Block until a message arrives, max 90s (used after send) |
 | `list_agents` | List all connected peers |
 | `discover_agents` | Find peers by skill tag |
 | `get_messages` | Get unread messages from inbox |
@@ -249,7 +250,7 @@ If Bridge B is in wait_for_messages:
 If Bridge B is NOT in wait_for_messages:
   → Message queued in pendingNotifications
   → Next tool call (any tool) includes the notification in response
-  → CronCreate fires within 1 minute, calls wait_for_messages
+  → CronCreate fires within 2 minutes, calls check_messages (non-blocking)
 ```
 
 ## Troubleshooting
@@ -272,4 +273,4 @@ If Bridge B is NOT in wait_for_messages:
 
 **CronCreate not set up:**
 - If Claude Code didn't set up the poll after connecting, manually tell it:
-  > Set up a cron job: CronCreate with cron "*/1 * * * *" and prompt "call wait_for_messages to check for incoming agent messages"
+  > Set up a cron job: CronCreate with cron "*/2 * * * *" and prompt "call check_messages to check for incoming agent messages"
