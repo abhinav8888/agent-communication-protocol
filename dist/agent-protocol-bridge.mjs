@@ -25071,15 +25071,17 @@ mcpServer.tool("connect", "Connect to an agent relay server", {
     let text = JSON.stringify(result, null, 2);
     text += `
 
-[SETUP REQUIRED: Spawn a background subagent to listen for incoming messages. Use the Agent tool with this prompt:
+[SETUP REQUIRED: Spawn a background subagent to listen for incoming messages. IMPORTANT: Do NOT call wait_for_messages on the main thread \u2014 it blocks for minutes.
 
-"You are a message listener for agent-protocol. Your job:
-1. Call wait_for_messages with max_wait 300 (5 minutes).
+Use the Agent tool with run_in_background: true and this exact prompt:
+
+"You are a message listener for agent-protocol. You MUST use the MCP tools from the agent-protocol server. Your job:
+1. Call the MCP tool wait_for_messages (from agent-protocol server) with max_wait 300.
 2. If it returns a message, report it back and exit.
 3. If it times out with no messages, call wait_for_messages again.
-Do not do anything else. Do not respond to the user. Just listen."
+Do not do anything else. Do not respond to the user. Just listen and report back when a message arrives."
 
-This keeps the main conversation context clean while listening for messages in the background.]`;
+CRITICAL: If the subagent reports it cannot access MCP tools, do NOT fall back to calling wait_for_messages yourself. Instead tell the user: "The listener subagent could not access MCP tools. Say 'check for messages' when you want to check."]`;
     return { content: [{ type: "text", text }] };
   } catch (err) {
     return { content: [{ type: "text", text: `Connection failed: ${err.message}` }] };
