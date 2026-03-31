@@ -8,7 +8,7 @@ export const TaskState = {
 export const TERMINAL_STATES = [TaskState.COMPLETED, TaskState.FAILED];
 
 const VALID_TRANSITIONS = {
-  [TaskState.SUBMITTED]: [TaskState.WORKING, TaskState.FAILED],
+  [TaskState.SUBMITTED]: [TaskState.WORKING, TaskState.COMPLETED, TaskState.FAILED],
   [TaskState.WORKING]: [TaskState.COMPLETED, TaskState.FAILED],
   [TaskState.COMPLETED]: [],
   [TaskState.FAILED]: [],

@@ -29,6 +29,6 @@ describe('isValidTransition', () => {
     expect(isValidTransition('failed', 'working')).toBe(false);
     expect(isValidTransition('failed', 'submitted')).toBe(false);
   });
-  it('rejects submitted -> completed', () => { expect(isValidTransition('submitted', 'completed')).toBe(false); });
+  it('allows submitted -> completed', () => { expect(isValidTransition('submitted', 'completed')).toBe(true); });
   it('rejects same-state transitions', () => { expect(isValidTransition('working', 'working')).toBe(false); });
 });
