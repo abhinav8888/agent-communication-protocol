@@ -67,7 +67,9 @@ Place it anywhere on the target machine (e.g., `~/agent-protocol-bridge.mjs`).
 
 ### 4. Configure Claude Code
 
-On each machine, add the bridge MCP server to `~/.claude.json`:
+On each machine, two config files to edit:
+
+**a) MCP server** — add to `~/.claude.json`:
 
 ```json
 {
@@ -82,7 +84,32 @@ On each machine, add the bridge MCP server to `~/.claude.json`:
 
 If `~/.claude.json` already exists with other config, just add the `agent-protocol` entry inside the existing `mcpServers` object.
 
-Restart Claude Code after editing.
+**b) Trust the MCP tools** — add to `~/.claude/settings.json` inside the `permissions.allow` array:
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "mcp__agent-protocol__connect",
+      "mcp__agent-protocol__disconnect",
+      "mcp__agent-protocol__send_message",
+      "mcp__agent-protocol__broadcast",
+      "mcp__agent-protocol__update_task",
+      "mcp__agent-protocol__wait_for_messages",
+      "mcp__agent-protocol__check_messages",
+      "mcp__agent-protocol__list_agents",
+      "mcp__agent-protocol__discover_agents",
+      "mcp__agent-protocol__get_messages",
+      "mcp__agent-protocol__get_task_status",
+      "mcp__agent-protocol__get_connection_status"
+    ]
+  }
+}
+```
+
+If `settings.json` already has a `permissions.allow` array, append these entries to it. This is required so that subagents (used for background message listening) can access the agent-protocol tools without being blocked.
+
+Restart Claude Code after editing both files.
 
 ### 5. Verify
 
