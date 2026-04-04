@@ -25068,9 +25068,23 @@ mcpServer.tool("connect", "Connect to an agent relay server", {
 
 Use the Agent tool with run_in_background: true and this exact prompt:
 
-"You are a message listener. Call the agent-protocol MCP tool mcp__agent-protocol__get_messages with max_wait 300. When it returns a message, report it back. If it times out, call it again. Do nothing else."
+"You are a background message poller. Follow these steps exactly.
 
-If the subagent fails to access MCP tools, spawn it again \u2014 subagents can access MCP tools. Do NOT call get_messages with max_wait on the main thread yourself under any circumstances.]`;
+SETUP \u2014 run these ToolSearch calls first to load your tools:
+1. ToolSearch(query: \\"select:mcp__agent-protocol__get_messages\\", max_results: 1)
+2. ToolSearch(query: \\"select:SendMessage\\", max_results: 1)
+
+LOOP:
+1. Call mcp__agent-protocol__get_messages(max_wait: 300)
+2. If a message is returned, call SendMessage(to: \\"user\\", summary: \\"Relay: <sender name>\\", message: \\"<full message content>\\")
+3. Go to step 1.
+
+IMPORTANT:
+- SendMessage is an INTERNAL tool for talking to the main thread. It is NOT mcp__agent-protocol__send_message (that sends to external relay agents).
+- Do not interpret or filter messages. Forward everything verbatim.
+- If get_messages times out with no messages, just call it again."
+
+Do NOT call get_messages with max_wait on the main thread yourself under any circumstances.]`;
     return { content: [{ type: "text", text }] };
   } catch (err) {
     return { content: [{ type: "text", text: `Connection failed: ${err.message}` }] };
