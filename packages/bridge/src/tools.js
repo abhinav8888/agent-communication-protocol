@@ -19,11 +19,7 @@ export function createToolHandlers(connection, inbox, taskTracker) {
       if (data) parts.push({ mediaType: 'application/json', data });
       return connection.sendRequest('tasks/broadcast', '*', { taskId, message: { messageId: randomUUID(), role: 'agent', parts, metadata: {} } });
     },
-    async get_messages() {
-      const unread = inbox.getUnread();
-      for (const msg of unread) inbox.markRead(msg.taskId);
-      return { messages: unread };
-    },
+    // get_messages is handled directly in index.js as a unified tool
     async get_task_status({ taskId }) {
       const sentTask = taskTracker.getStatus(taskId);
       if (sentTask) return sentTask;

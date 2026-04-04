@@ -55,9 +55,7 @@ async function doConnect({ relay_url, name, admin_key }) {
     onMessage: (msg) => {
       if (msg.method === 'tasks/receive') {
         inbox.writeMessage(msg.params);
-        const notif = formatNotification(msg.params);
-        pendingNotifications.push(notif);
-        writeNotificationToFile(notif);
+        writeNotificationToFile(formatNotification(msg.params));
         messageEvents.emit('message');
       } else if (msg.method === 'tasks/update') {
         try { taskTracker.updateSentStatus(msg.params.taskId, msg.params.status); } catch {}
@@ -104,10 +102,9 @@ function wrapHandler(handler, { appendWaitInstruction = false } = {}) {
   return async (args) => {
     requireConnected();
     const result = await handler(args);
-    let text = drainNotifications();
-    text += JSON.stringify(result, null, 2);
+    let text = JSON.stringify(result, null, 2);
     if (appendWaitInstruction) {
-      text += '\n\n[Now call wait_for_messages to listen for the response.]';
+      text += '\n\n[Now call get_messages with max_wait to listen for the response.]';
     }
     return { content: [{ type: 'text', text }] };
   };
@@ -147,13 +144,13 @@ mcpServer.tool('connect', 'Connect to an agent relay server', {
   try {
     const result = await doConnect(args);
     let text = JSON.stringify(result, null, 2);
-    text += `\n\n[SETUP REQUIRED: Spawn a background subagent to listen for incoming messages. IMPORTANT: Do NOT call wait_for_messages on the main thread — it will block you for minutes.
+    text += `\n\n[SETUP REQUIRED: Spawn a background subagent to listen for incoming messages. IMPORTANT: Do NOT call get_messages with max_wait on the main thread — it will block you for minutes.
 
 Use the Agent tool with run_in_background: true and this exact prompt:
 
-"You are a message listener. Call the agent-protocol MCP tool mcp__agent-protocol__wait_for_messages with max_wait 300. When it returns a message, report it back. If it times out, call it again. Do nothing else."
+"You are a message listener. Call the agent-protocol MCP tool mcp__agent-protocol__get_messages with max_wait 300. When it returns a message, report it back. If it times out, call it again. Do nothing else."
 
-If the subagent fails to access MCP tools, spawn it again — subagents can access MCP tools. Do NOT call wait_for_messages on the main thread yourself under any circumstances.]`;
+If the subagent fails to access MCP tools, spawn it again — subagents can access MCP tools. Do NOT call get_messages with max_wait on the main thread yourself under any circumstances.]`;
     return { content: [{ type: 'text', text }] };
   } catch (err) {
     return { content: [{ type: 'text', text: `Connection failed: ${err.message}` }] };
@@ -185,37 +182,38 @@ mcpServer.tool('update_task', 'Update a received task status (working/completed/
   text: z.string().optional().describe('Optional response message'),
 }, wrapHandler(async (args) => handlers.update_task(args), { appendWaitInstruction: true }));
 
-// -- check_messages: non-blocking, used by cron --
+// -- get_messages: unified message reader --
 
-mcpServer.tool('check_messages', 'Check for pending messages from other agents. Non-blocking — returns immediately. Used by the CronCreate polling job.', {}, async () => {
-  requireConnected();
-  if (pendingNotifications.length > 0) {
-    return { content: [{ type: 'text', text: drainNotifications() }] };
-  }
-  return { content: [{ type: 'text', text: 'No new messages.' }] };
-});
-
-// -- wait_for_messages: blocking, used after send/update --
-
-mcpServer.tool('wait_for_messages', 'Block until a message arrives from another agent. Loops internally — only returns when a message is received or max time is reached. Call this after sending a message to wait for the reply.', {
-  max_wait: z.number().optional().default(1800).describe('Max total seconds to wait (default 1800 = 30 minutes)'),
+mcpServer.tool('get_messages', 'Get messages from other agents. Returns immediately by default. Set max_wait > 0 to block until a message arrives.', {
+  max_wait: z.number().optional().default(0).describe('Seconds to wait for messages (0 = return immediately, >0 = block up to N seconds)'),
 }, async (args) => {
   requireConnected();
 
-  // Return immediately if messages are already pending
-  if (pendingNotifications.length > 0) {
-    return { content: [{ type: 'text', text: drainNotifications() }] };
+  function collect() {
+    const parts = [];
+    const unread = inbox.getUnread();
+    if (unread.length > 0) {
+      for (const msg of unread) inbox.markRead(msg.taskId);
+      parts.push(unread.map(m => formatNotification(m)).join('\n\n'));
+    }
+    if (pendingNotifications.length > 0) {
+      parts.push(drainNotifications());
+    }
+    return parts.length > 0 ? parts.join('\n\n') : null;
   }
 
-  const maxWait = (args.max_wait ?? 1800) * 1000;
-  const started = Date.now();
+  const immediate = collect();
+  if (immediate) return { content: [{ type: 'text', text: immediate }] };
 
-  // Loop internally — no repeated LLM calls
+  const maxWait = (args.max_wait ?? 0) * 1000;
+  if (maxWait <= 0) {
+    return { content: [{ type: 'text', text: 'No new messages.' }] };
+  }
+
+  const started = Date.now();
   while (Date.now() - started < maxWait) {
     const remaining = maxWait - (Date.now() - started);
     if (remaining <= 0) break;
-
-    // Wait up to 90s per cycle, or remaining time, whichever is shorter
     const cycleTimeout = Math.min(90 * 1000, remaining);
 
     const arrived = await new Promise((resolve) => {
@@ -223,20 +221,15 @@ mcpServer.tool('wait_for_messages', 'Block until a message arrives from another 
         messageEvents.removeListener('message', onMsg);
         resolve(false);
       }, cycleTimeout);
-
-      function onMsg() {
-        clearTimeout(timer);
-        resolve(true);
-      }
-
+      function onMsg() { clearTimeout(timer); resolve(true); }
       messageEvents.once('message', onMsg);
     });
 
-    if (arrived && pendingNotifications.length > 0) {
-      return { content: [{ type: 'text', text: drainNotifications() }] };
+    if (arrived) {
+      const text = collect();
+      if (text) return { content: [{ type: 'text', text }] };
     }
 
-    // Check if connection dropped
     if (!connection || !connection.isConnected()) {
       return { content: [{ type: 'text', text: 'Connection lost while waiting for messages.' }] };
     }
@@ -249,12 +242,10 @@ mcpServer.tool('wait_for_messages', 'Block until a message arrives from another 
 
 mcpServer.tool('list_agents', 'List all connected peer agents', {}, wrapHandler(async () => handlers.list_agents({})));
 mcpServer.tool('discover_agents', 'Find agents by skill tag', { tag: z.string().describe('Skill tag to search for') }, wrapHandler(async (args) => handlers.discover_agents(args)));
-mcpServer.tool('get_messages', 'Get unread messages from other agents', {}, wrapHandler(async () => handlers.get_messages({})));
 mcpServer.tool('get_task_status', 'Check the status of a task', { taskId: z.string().describe('Task ID to check') }, wrapHandler(async (args) => handlers.get_task_status(args)));
 mcpServer.tool('get_connection_status', 'Check relay connection status', {}, async () => {
   const connected = connection?.isConnected() || false;
-  let text = drainNotifications();
-  text += JSON.stringify({ connected }, null, 2);
+  const text = JSON.stringify({ connected }, null, 2);
   return { content: [{ type: 'text', text }] };
 });
 
