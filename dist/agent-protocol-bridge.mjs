@@ -4319,11 +4319,11 @@ var require_core = __commonJS({
     Ajv2.ValidationError = validation_error_1.default;
     Ajv2.MissingRefError = ref_error_1.default;
     exports.default = Ajv2;
-    function checkOptions(checkOpts, options, msg, log = "error") {
+    function checkOptions(checkOpts, options, msg, log2 = "error") {
       for (const key in checkOpts) {
         const opt = key;
         if (opt in options)
-          this.logger[log](`${msg}: option ${key}. ${checkOpts[opt]}`);
+          this.logger[log2](`${msg}: option ${key}. ${checkOpts[opt]}`);
       }
     }
     function getSchEnv(keyRef) {
@@ -24636,7 +24636,7 @@ var TaskState = {
 };
 var TERMINAL_STATES = [TaskState.COMPLETED, TaskState.FAILED];
 var VALID_TRANSITIONS = {
-  [TaskState.SUBMITTED]: [TaskState.WORKING, TaskState.FAILED],
+  [TaskState.SUBMITTED]: [TaskState.WORKING, TaskState.COMPLETED, TaskState.FAILED],
   [TaskState.WORKING]: [TaskState.COMPLETED, TaskState.FAILED],
   [TaskState.COMPLETED]: [],
   [TaskState.FAILED]: []
@@ -24943,9 +24943,23 @@ function createToolHandlers(connection2, inbox2, taskTracker2) {
 var AP_DIR = join2(process.env.HOME, ".agent-protocol");
 var INBOX_BASE = join2(AP_DIR, "inbox");
 var NOTIFICATIONS_FILE = join2(AP_DIR, "notifications");
+var DEBUG = process.env.AGENT_PROTOCOL_DEBUG === "1";
+function log(event, data = {}) {
+  if (!DEBUG) return;
+  try {
+    process.stderr.write(JSON.stringify({ ts: (/* @__PURE__ */ new Date()).toISOString(), event, ...data }) + "\n");
+  } catch {
+  }
+}
 function writeNotificationToFile(text) {
-  mkdirSync2(AP_DIR, { recursive: true });
-  appendFileSync(NOTIFICATIONS_FILE, text + "\n", { mode: 384 });
+  try {
+    mkdirSync2(AP_DIR, { recursive: true });
+    appendFileSync(NOTIFICATIONS_FILE, text + "\n", { mode: 384 });
+    return true;
+  } catch (err) {
+    log("file_write_failed", { error: err.message });
+    return false;
+  }
 }
 var connection = null;
 var inbox = null;
@@ -24957,6 +24971,8 @@ async function doConnect({ relay_url, name, admin_key }) {
   if (connection && connection.isConnected()) {
     await connection.disconnect();
   }
+  pendingNotifications.length = 0;
+  log("connecting", { relay_url, name });
   const agentCard = {
     name,
     description: `Agent ${name}`,
@@ -24975,27 +24991,26 @@ async function doConnect({ relay_url, name, admin_key }) {
     adminKey: admin_key,
     onMessage: (msg) => {
       if (msg.method === "tasks/receive") {
-        inbox.writeMessage(msg.params);
-        const notif = formatNotification(msg.params);
-        pendingNotifications.push(notif);
-        writeNotificationToFile(notif);
-        pushChannel(notif, { taskId: msg.params.taskId });
+        try {
+          inbox.writeMessage(msg.params);
+        } catch (err) {
+          log("inbox_write_failed", { error: err.message, taskId: msg.params?.taskId });
+        }
+        deliver(formatNotification(msg.params), { taskId: msg.params?.taskId, kind: "receive" });
       } else if (msg.method === "tasks/update") {
         try {
           taskTracker.updateSentStatus(msg.params.taskId, msg.params.status);
         } catch {
         }
-        const notif = formatUpdateNotification(msg.params);
-        pendingNotifications.push(notif);
-        writeNotificationToFile(notif);
-        pushChannel(notif, { taskId: msg.params.taskId });
+        deliver(formatUpdateNotification(msg.params), { taskId: msg.params?.taskId, kind: "update" });
+      } else {
+        log("unknown_method", { method: msg.method });
       }
     },
     onDisconnect: (code) => {
+      log("disconnected", { code });
       if (code !== 1e3) {
-        const notif = "[relay disconnected, reconnecting...]";
-        pendingNotifications.push(notif);
-        writeNotificationToFile(notif);
+        deliver("[relay disconnected, reconnecting...]", { kind: "system" });
       }
     }
   });
@@ -25057,8 +25072,17 @@ function pushChannel(text, meta = {}) {
       method: "notifications/claude/channel",
       params: { content: text, meta: { source: "agent-protocol", ...meta } }
     });
-  } catch {
+    log("channel_pushed", meta);
+    return true;
+  } catch (err) {
+    log("channel_push_failed", { error: err.message, ...meta });
+    return false;
   }
+}
+function deliver(text, meta = {}) {
+  if (pushChannel(text, meta)) return;
+  pendingNotifications.push(text);
+  writeNotificationToFile(text);
 }
 var mcpServer = new McpServer(
   { name: "agent-protocol-bridge", version: "1.0.0" },
@@ -25070,43 +25094,70 @@ var mcpServer = new McpServer(
     }
   }
 );
-mcpServer.tool("connect", "Connect to an agent relay server", {
-  relay_url: external_exports.string().describe("Relay WebSocket URL (e.g., ws://localhost:8080)"),
-  name: external_exports.string().describe("Agent name to register as"),
-  admin_key: external_exports.string().describe("Relay admin key")
+mcpServer.registerTool("connect", {
+  description: "Connect to an agent relay server",
+  inputSchema: {
+    relay_url: external_exports.string().describe("Relay WebSocket URL (e.g., ws://localhost:8080)"),
+    name: external_exports.string().describe("Agent name to register as"),
+    admin_key: external_exports.string().describe("Relay admin key")
+  }
 }, async (args) => {
   try {
     const result = await doConnect(args);
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   } catch (err) {
+    log("connect_failed", { error: err.message });
     return { content: [{ type: "text", text: `Connection failed: ${err.message}` }] };
   }
 });
-mcpServer.tool("disconnect", "Disconnect from the relay server", {}, async () => {
+mcpServer.registerTool("disconnect", {
+  description: "Disconnect from the relay server"
+}, async () => {
   if (connection) await connection.disconnect();
   connection = null;
   handlers = null;
   return { content: [{ type: "text", text: "Disconnected." }] };
 });
-mcpServer.tool("list_agents", "List all connected peer agents", {}, wrapHandler(async () => handlers.list_agents({})));
-mcpServer.tool("discover_agents", "Find agents by skill tag", { tag: external_exports.string().describe("Skill tag to search for") }, wrapHandler(async (args) => handlers.discover_agents(args)));
-mcpServer.tool("send_message", "Send a message to a specific agent", {
-  to: external_exports.string().describe("Target agent name"),
-  text: external_exports.string().describe("Message text"),
-  data: external_exports.any().optional().describe("Optional structured data to attach")
+mcpServer.registerTool("list_agents", {
+  description: "List all connected peer agents"
+}, wrapHandler(async () => handlers.list_agents({})));
+mcpServer.registerTool("discover_agents", {
+  description: "Find agents by skill tag",
+  inputSchema: { tag: external_exports.string().describe("Skill tag to search for") }
+}, wrapHandler(async (args) => handlers.discover_agents(args)));
+mcpServer.registerTool("send_message", {
+  description: "Send a message to a specific agent",
+  inputSchema: {
+    to: external_exports.string().describe("Target agent name"),
+    text: external_exports.string().describe("Message text"),
+    data: external_exports.any().optional().describe("Optional structured data to attach")
+  }
 }, wrapHandler(async (args) => handlers.send_message(args)));
-mcpServer.tool("broadcast", "Send a message to all connected agents", {
-  text: external_exports.string().describe("Message text"),
-  data: external_exports.any().optional().describe("Optional structured data to attach")
+mcpServer.registerTool("broadcast", {
+  description: "Send a message to all connected agents",
+  inputSchema: {
+    text: external_exports.string().describe("Message text"),
+    data: external_exports.any().optional().describe("Optional structured data to attach")
+  }
 }, wrapHandler(async (args) => handlers.broadcast(args)));
-mcpServer.tool("get_messages", "Get unread messages from other agents", {}, wrapHandler(async () => handlers.get_messages({})));
-mcpServer.tool("get_task_status", "Check the status of a task", { taskId: external_exports.string().describe("Task ID to check") }, wrapHandler(async (args) => handlers.get_task_status(args)));
-mcpServer.tool("update_task", "Update a received task status (working/completed/failed)", {
-  taskId: external_exports.string().describe("Task ID to update"),
-  status: external_exports.enum(["working", "completed", "failed"]).describe("New status"),
-  text: external_exports.string().optional().describe("Optional response message")
+mcpServer.registerTool("get_messages", {
+  description: "Get unread messages from other agents"
+}, wrapHandler(async () => handlers.get_messages({})));
+mcpServer.registerTool("get_task_status", {
+  description: "Check the status of a task",
+  inputSchema: { taskId: external_exports.string().describe("Task ID to check") }
+}, wrapHandler(async (args) => handlers.get_task_status(args)));
+mcpServer.registerTool("update_task", {
+  description: "Update a received task status (working/completed/failed)",
+  inputSchema: {
+    taskId: external_exports.string().describe("Task ID to update"),
+    status: external_exports.enum(["working", "completed", "failed"]).describe("New status"),
+    text: external_exports.string().optional().describe("Optional response message")
+  }
 }, wrapHandler(async (args) => handlers.update_task(args)));
-mcpServer.tool("get_connection_status", "Check relay connection status", {}, async () => {
+mcpServer.registerTool("get_connection_status", {
+  description: "Check relay connection status"
+}, async () => {
   const connected = connection?.isConnected() || false;
   const notifications = pendingNotifications.splice(0);
   let text = "";
