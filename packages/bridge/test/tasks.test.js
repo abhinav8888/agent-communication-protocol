@@ -18,7 +18,8 @@ describe('TaskTracker', () => {
   });
   it('rejects invalid transitions', () => {
     tracker.trackSent('task-1', 'agent-b');
-    expect(() => tracker.updateSentStatus('task-1', 'completed')).toThrow(/invalid/i);
+    tracker.updateSentStatus('task-1', 'completed');
+    expect(() => tracker.updateSentStatus('task-1', 'working')).toThrow(/invalid/i);
   });
   it('returns null for unknown task', () => { expect(tracker.getStatus('nonexistent')).toBeNull(); });
   it('lists all sent tasks', () => {

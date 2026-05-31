@@ -13,9 +13,23 @@ const AP_DIR = join(process.env.HOME, '.agent-protocol');
 const INBOX_BASE = join(AP_DIR, 'inbox');
 const NOTIFICATIONS_FILE = join(AP_DIR, 'notifications');
 
+const DEBUG = process.env.AGENT_PROTOCOL_DEBUG === '1';
+function log(event, data = {}) {
+  if (!DEBUG) return;
+  try {
+    process.stderr.write(JSON.stringify({ ts: new Date().toISOString(), event, ...data }) + '\n');
+  } catch { /* never let logging crash the bridge */ }
+}
+
 function writeNotificationToFile(text) {
-  mkdirSync(AP_DIR, { recursive: true });
-  appendFileSync(NOTIFICATIONS_FILE, text + '\n', { mode: 0o600 });
+  try {
+    mkdirSync(AP_DIR, { recursive: true });
+    appendFileSync(NOTIFICATIONS_FILE, text + '\n', { mode: 0o600 });
+    return true;
+  } catch (err) {
+    log('file_write_failed', { error: err.message });
+    return false;
+  }
 }
 
 // Event emitter for instant wakeup of wait_for_messages
@@ -33,6 +47,8 @@ async function doConnect({ relay_url, name, admin_key }) {
   if (connection && connection.isConnected()) {
     await connection.disconnect();
   }
+  pendingNotifications.length = 0;
+  log('connecting', { relay_url, name });
 
   const agentCard = {
     name,
@@ -54,23 +70,19 @@ async function doConnect({ relay_url, name, admin_key }) {
     adminKey: admin_key,
     onMessage: (msg) => {
       if (msg.method === 'tasks/receive') {
-        inbox.writeMessage(msg.params);
-        writeNotificationToFile(formatNotification(msg.params));
-        messageEvents.emit('message');
+        try { inbox.writeMessage(msg.params); } catch (err) { log('inbox_write_failed', { error: err.message, taskId: msg.params?.taskId }); }
+        deliver(formatNotification(msg.params), { taskId: msg.params?.taskId, kind: 'receive' });
       } else if (msg.method === 'tasks/update') {
         try { taskTracker.updateSentStatus(msg.params.taskId, msg.params.status); } catch {}
-        const notif = formatUpdateNotification(msg.params);
-        pendingNotifications.push(notif);
-        writeNotificationToFile(notif);
-        messageEvents.emit('message');
+        deliver(formatUpdateNotification(msg.params), { taskId: msg.params?.taskId, kind: 'update' });
+      } else {
+        log('unknown_method', { method: msg.method });
       }
     },
     onDisconnect: (code) => {
+      log('disconnected', { code });
       if (code !== 1000) {
-        const notif = '[relay disconnected, reconnecting...]';
-        pendingNotifications.push(notif);
-        writeNotificationToFile(notif);
-        messageEvents.emit('message');
+        deliver('[relay disconnected, reconnecting...]', { kind: 'system' });
       }
     },
   });
@@ -130,9 +142,56 @@ function formatUpdateNotification(params) {
   return text;
 }
 
+// --- Channel push notifications ---
+
+// Sends an MCP server-initiated notification to wake up idle sessions.
+// Uses mcpServer.server (the underlying Protocol/Server instance) which exposes
+// notification() for arbitrary one-way messages. Unknown methods fall through
+// assertNotificationCapability() without error, so no capability flag is required
+// for this to work — but we advertise it in experimental capabilities anyway.
+// Returns true on apparent success, false on throw (transport not connected, etc).
+// Note: this is fire-and-forget JSON-RPC — "success" only means the call did not
+// synchronously throw. If the client silently ignores the notification, we cannot
+// detect that here.
+function pushChannel(text, meta = {}) {
+  try {
+    mcpServer.server.notification({
+      method: 'notifications/claude/channel',
+      params: { content: text, meta: { source: 'agent-protocol', ...meta } },
+    });
+    log('channel_pushed', meta);
+    return true;
+  } catch (err) {
+    log('channel_push_failed', { error: err.message, ...meta });
+    return false;
+  }
+}
+
+// Channel-first delivery with file + tool-result fallback.
+// On channel success, the message reaches the active Claude Code session
+// immediately and we do nothing else — avoids the historical triple-delivery
+// (channel + file + pendingNotifications) that surfaced the same message twice.
+// On channel failure, fall back to the file (PostToolUse hook drains it on
+// next tool call) AND pendingNotifications (piggybacked onto next tool result).
+function deliver(text, meta = {}) {
+  messageEvents.emit('message');
+  if (pushChannel(text, meta)) return;
+  pendingNotifications.push(text);
+  writeNotificationToFile(text);
+}
+
 // --- MCP Server ---
 
-const mcpServer = new McpServer({ name: 'agent-protocol-bridge', version: '1.0.0' });
+const mcpServer = new McpServer(
+  { name: 'agent-protocol-bridge', version: '1.0.0' },
+  {
+    capabilities: {
+      experimental: {
+        'claude/channel': {},
+      },
+    },
+  }
+);
 
 // -- Connection tools --
 
@@ -170,6 +229,7 @@ IMPORTANT:
 Do NOT call get_messages with max_wait on the main thread yourself under any circumstances.]`;
     return { content: [{ type: 'text', text }] };
   } catch (err) {
+    log('connect_failed', { error: err.message });
     return { content: [{ type: 'text', text: `Connection failed: ${err.message}` }] };
   }
 });
@@ -227,8 +287,9 @@ mcpServer.registerTool('get_messages', {
       for (const msg of unread) inbox.markRead(msg.taskId);
       parts.push(unread.map(m => formatNotification(m)).join('\n\n'));
     }
-    if (pendingNotifications.length > 0) {
-      parts.push(drainNotifications());
+    const drained = drainNotifications();
+    if (drained) {
+      parts.push(drained);
     }
     return parts.length > 0 ? parts.join('\n\n') : null;
   }

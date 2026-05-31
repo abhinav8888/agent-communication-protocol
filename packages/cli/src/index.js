@@ -3,6 +3,7 @@
 import { Command } from 'commander';
 import { relayCommand } from './relay.js';
 import { joinCommand } from './join.js';
+import { setupCommand } from './setup.js';
 
 const program = new Command();
 program
@@ -12,4 +13,5 @@ program
 
 program.addCommand(relayCommand);
 program.addCommand(joinCommand);
+program.addCommand(setupCommand);
 program.parse();

@@ -56,7 +56,23 @@ node packages/cli/src/index.js relay --port 8080 --admin-key my-secret-key
 
 ### 3. Install the Bridge on Each Machine
 
-Copy a single file to each machine that will run Claude Code:
+**Quick install (automated):** on the target machine, from a checkout of this repo:
+
+```bash
+npm run build  # produces dist/agent-protocol-bridge.mjs (skip if already built)
+node packages/cli/src/index.js setup           # adds MCP entry + PostToolUse hook
+node packages/cli/src/index.js setup --debug   # same, but enables AGENT_PROTOCOL_DEBUG=1
+```
+
+This copies `dist/agent-protocol-bridge.mjs` and `hooks/check-notifications.sh` into `~/.agent-protocol/bin/`, registers the bridge under `mcpServers.agent-protocol` in `~/.claude.json`, and appends the PostToolUse hook to `~/.claude/settings.json`. Re-running it updates the entries in place. Skip ahead to step 4 (Verify) after this.
+
+To enable channels (research preview), launch Claude Code with:
+
+```bash
+claude --dangerously-load-development-channels server:agent-protocol
+```
+
+**Manual install:** copy a single file to each machine that will run Claude Code:
 
 ```bash
 # From the project directory, the bundle is at:
