@@ -4,7 +4,7 @@ import { signMessage } from './hmac.js';
 export function createEnvelope({ method, from, to, params, secret }) {
   const timestamp = Math.floor(Date.now() / 1000);
   const id = randomUUID();
-  const signature = signMessage(secret, timestamp, params);
+  const signature = signMessage(secret, { id, method, from, to, timestamp, params });
   const envelope = { jsonrpc: '2.0', id, method, from, timestamp, signature, params };
   if (to !== undefined) envelope.to = to;
   return envelope;

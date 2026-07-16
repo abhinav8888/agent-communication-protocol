@@ -34,6 +34,6 @@ export class AuthManager {
     return entry.count <= this.rateLimitPerSec;
   }
   verifyEnvelope(envelope, secret) {
-    return verifySignature(secret, envelope.timestamp, envelope.params, envelope.signature);
+    return verifySignature(secret, envelope, envelope.signature);
   }
 }

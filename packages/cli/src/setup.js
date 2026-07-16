@@ -1,5 +1,6 @@
 import { Command } from 'commander';
-import { copyFileSync, chmodSync, mkdirSync, existsSync, readFileSync, writeFileSync, renameSync } from 'node:fs';
+import { copyFileSync, chmodSync, mkdirSync, existsSync, readFileSync, readSync, writeFileSync, renameSync } from 'node:fs';
+import { execSync } from 'node:child_process';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -8,77 +9,226 @@ const REPO_ROOT = join(HERE, '..', '..', '..');
 const SRC_BRIDGE = join(REPO_ROOT, 'dist', 'agent-protocol-bridge.mjs');
 const SRC_HOOK = join(REPO_ROOT, 'hooks', 'check-notifications.sh');
 
+// --- IDE definitions ---
+// delivery mode is set as AGENT_PROTOCOL_DELIVERY env in the MCP server config.
+// The bridge reads it to tailor post-connect instructions for the agent.
+
+const IDES = {
+  'claude-code': {
+    label: 'Claude Code',
+    delivery: 'channel',
+    configPath: () => join(process.env.HOME, '.claude.json'),
+    hint: 'Restart Claude Code. For channel push, launch with:\n  claude --dangerously-load-development-channels server:agent-protocol',
+  },
+  cursor: {
+    label: 'Cursor',
+    delivery: 'poll',
+    configPath: () => join(process.env.HOME, '.cursor', 'mcp.json'),
+    hint: 'Restart Cursor to pick up the new MCP server.',
+  },
+  codex: {
+    label: 'Codex CLI',
+    delivery: 'poll',
+    configPath: () => join(process.env.HOME, '.codex', 'config.toml'),
+    hint: 'Restart Codex to pick up the new MCP server.',
+  },
+  omp: {
+    label: 'Oh My Pi',
+    delivery: 'irc',
+    configPath: () => join(process.env.HOME, '.omp', 'agent', 'mcp.json'),
+    hint: 'Restart OMP to pick up the new MCP server.',
+  },
+  'omp-channels': {
+    label: 'Oh My Pi (channels)',
+    delivery: 'channel-pi',
+    configPath: () => join(process.env.HOME, '.pi-channels.json'),
+    hint: 'Install pi-channels plugin: pi install npm:pi-channels\nThen launch OMP from any project with: omp --channels agent-protocol',
+  },
+};
+
+// Aliases: 'pi' → 'omp', 'pi-channels' → 'omp-channels'
+const IDE_ALIASES = { pi: 'omp', 'pi-channels': 'omp-channels' };
+
 export const setupCommand = new Command('setup')
-  .description('Install bridge, hook, MCP entry, and PostToolUse hook for Claude Code')
-  .option('--dest <dir>', 'Where to copy bridge and hook script', join(process.env.HOME, '.agent-protocol', 'bin'))
-  .option('--mcp-name <name>', 'MCP server name in ~/.claude.json', 'agent-protocol')
+  .description('Install the agent-protocol bridge for one or more IDEs')
+  .argument('[ides...]', 'IDEs to set up (claude-code, cursor, codex, omp, omp-channels)', ['claude-code'])
+  .option('--dest <dir>', 'Where to copy the bridge bundle', join(process.env.HOME, '.agent-protocol', 'bin'))
+  .option('--mcp-name <name>', 'MCP server name in IDE config', 'agent-protocol')
   .option('--debug', 'Set AGENT_PROTOCOL_DEBUG=1 in the MCP server env')
-  .action((opts) => {
+  .option('--with-hook', 'Install PostToolUse hook for Claude Code (optional safety net for file-based notifications)', false)
+  .action((ides, opts) => {
+    // Resolve aliases (pi → omp)
+    const resolved = ides.map((name) => IDE_ALIASES[name] || name);
+    const invalid = resolved.filter((name) => !IDES[name]);
+    if (invalid.length > 0) {
+      console.error(`[agent-protocol] Unknown IDE(s): ${invalid.join(', ')}`);
+      console.error(`[agent-protocol] Available: ${Object.keys(IDES).join(', ')} (aliases: ${Object.entries(IDE_ALIASES).map(([k, v]) => `${k}→${v}`).join(', ')})`);
+      process.exit(1);
+    }
+
+    const uniqueIdes = [...new Set(resolved)];
+
     if (!existsSync(SRC_BRIDGE)) {
       console.error(`[agent-protocol] Bundle missing: ${SRC_BRIDGE}`);
       console.error('[agent-protocol] Run "npm run build" from the repo root first.');
       process.exit(1);
     }
-    if (!existsSync(SRC_HOOK)) {
-      console.error(`[agent-protocol] Hook missing: ${SRC_HOOK}`);
-      process.exit(1);
+
+    // Copy bridge bundle (shared by all IDEs)
+    mkdirSync(opts.dest, { recursive: true });
+    const bridgeDest = join(opts.dest, 'agent-protocol-bridge.mjs');
+    copyFileSync(SRC_BRIDGE, bridgeDest);
+    console.error(`[agent-protocol] Installed bridge → ${bridgeDest}`);
+
+    // Copy hook only when explicitly requested for Claude Code
+    let hookDest = null;
+    if (opts.withHook && uniqueIdes.includes('claude-code')) {
+      if (!existsSync(SRC_HOOK)) {
+        console.error(`[agent-protocol] Hook missing: ${SRC_HOOK}`);
+        process.exit(1);
+      }
+      hookDest = join(opts.dest, 'check-notifications.sh');
+      copyFileSync(SRC_HOOK, hookDest);
+      chmodSync(hookDest, 0o755);
+      console.error(`[agent-protocol] Installed hook   → ${hookDest}`);
+    }
+    // For omp-channels: check if pi-channels plugin is installed, prompt if not
+    if (uniqueIdes.includes('omp-channels')) {
+      ensurePiChannelsInstalled();
     }
 
-    mkdirSync(opts.dest, { recursive: true });
 
-    const bridgeDest = join(opts.dest, 'agent-protocol-bridge.mjs');
-    const hookDest = join(opts.dest, 'check-notifications.sh');
-    copyFileSync(SRC_BRIDGE, bridgeDest);
-    copyFileSync(SRC_HOOK, hookDest);
-    chmodSync(hookDest, 0o755);
-    console.error(`[agent-protocol] Installed bridge → ${bridgeDest}`);
-    console.error(`[agent-protocol] Installed hook   → ${hookDest}`);
+    for (const ide of uniqueIdes) {
+      const def = IDES[ide];
+      const env = { AGENT_PROTOCOL_DELIVERY: def.delivery };
+      if (def.delivery === 'channel-pi') env.AGENT_PROTOCOL_MCP_NAME = opts.mcpName;
+      if (opts.debug) env.AGENT_PROTOCOL_DEBUG = '1';
 
-    updateClaudeJson({ mcpName: opts.mcpName, bridgePath: bridgeDest, debug: !!opts.debug });
-    updateSettingsJson({ hookPath: hookDest });
+      const writers = {
+        'claude-code': () => installClaudeCode({ mcpName: opts.mcpName, bridgePath: bridgeDest, hookPath: hookDest, env }),
+        cursor: () => installJsonMcp({ def, mcpName: opts.mcpName, bridgePath: bridgeDest, env }),
+        codex: () => installCodex({ mcpName: opts.mcpName, bridgePath: bridgeDest, env }),
+        omp: () => installJsonMcp({ def, mcpName: opts.mcpName, bridgePath: bridgeDest, env }),
+        'omp-channels': () => installPiChannels({ mcpName: opts.mcpName, bridgePath: bridgeDest, env }),
+      };
+      writers[ide]();
+    }
 
     console.error('');
     console.error('[agent-protocol] Done. Next steps:');
-    console.error('  1. Restart Claude Code (or any open sessions) to pick up the new MCP server.');
-    console.error('  2. Launch with channels enabled (research preview):');
-    console.error(`       claude --dangerously-load-development-channels server:${opts.mcpName}`);
-    console.error('  3. In a session: connect({ relay_url, name, admin_key })');
+    for (const ide of uniqueIdes) {
+      console.error(`  ${IDES[ide].label}: ${IDES[ide].hint}`);
+    }
+    console.error('  In a session: connect({ relay_url, name, admin_key })');
   });
 
-function updateClaudeJson({ mcpName, bridgePath, debug }) {
-  const path = join(process.env.HOME, '.claude.json');
+// --- Claude Code: JSON mcpServers + optional PostToolUse hook ---
+
+function installClaudeCode({ mcpName, bridgePath, hookPath, env }) {
+  const path = IDES['claude-code'].configPath();
   const config = readJson(path);
   if (!config.mcpServers) config.mcpServers = {};
-  const entry = { command: 'node', args: [bridgePath] };
-  if (debug) entry.env = { AGENT_PROTOCOL_DEBUG: '1' };
-  config.mcpServers[mcpName] = entry;
+  config.mcpServers[mcpName] = { command: 'node', args: [bridgePath], env };
   writeJsonAtomic(path, config);
   console.error(`[agent-protocol] Updated MCP entry "${mcpName}" in ${path}`);
+
+  if (hookPath) {
+    const settingsPath = join(process.env.HOME, '.claude', 'settings.json');
+    mkdirSync(dirname(settingsPath), { recursive: true });
+    const settings = readJson(settingsPath);
+    if (!settings.hooks) settings.hooks = {};
+    if (!Array.isArray(settings.hooks.PostToolUse)) settings.hooks.PostToolUse = [];
+
+    const isOurHook = (h) => h?.type === 'command' && typeof h.command === 'string' && h.command.endsWith('check-notifications.sh');
+    let group = settings.hooks.PostToolUse.find((g) => Array.isArray(g.hooks) && g.hooks.some(isOurHook));
+
+    if (group) {
+      group.hooks = group.hooks.filter((h) => !isOurHook(h));
+      group.hooks.push({ type: 'command', command: hookPath });
+    } else {
+      settings.hooks.PostToolUse.push({ matcher: '', hooks: [{ type: 'command', command: hookPath }] });
+    }
+
+    writeJsonAtomic(settingsPath, settings);
+    console.error(`[agent-protocol] Updated PostToolUse hook in ${settingsPath}`);
+  }
 }
 
-function updateSettingsJson({ hookPath }) {
-  const path = join(process.env.HOME, '.claude', 'settings.json');
+// --- Generic JSON mcpServers (Cursor, OMP) ---
+
+function installJsonMcp({ def, mcpName, bridgePath, env }) {
+  const path = def.configPath();
   mkdirSync(dirname(path), { recursive: true });
-  const settings = readJson(path);
-  if (!settings.hooks) settings.hooks = {};
-  if (!Array.isArray(settings.hooks.PostToolUse)) settings.hooks.PostToolUse = [];
+  const config = readJson(path);
+  if (!config.mcpServers) config.mcpServers = {};
+  config.mcpServers[mcpName] = { command: 'node', args: [bridgePath], env };
+  writeJsonAtomic(path, config);
+  console.error(`[agent-protocol] Updated MCP entry "${mcpName}" in ${path} (${def.label})`);
+}
 
-  // Find an existing matcher group whose hooks reference our script (any path
-  // ending in check-notifications.sh) so re-runs update in place instead of
-  // appending duplicates.
-  const isOurHook = (h) => h?.type === 'command' && typeof h.command === 'string' && h.command.endsWith('check-notifications.sh');
-  let group = settings.hooks.PostToolUse.find((g) => Array.isArray(g.hooks) && g.hooks.some(isOurHook));
+// --- OMP pi-channels: global ~/.pi-channels.json ---
+// The bridge acts as a channel server: pi-channels spawns it as a subprocess,
+// receives notifications/claude/channel pushes, and injects them as <channel> tags.
+// Tools are proxied as channel_<name>_<tool> (e.g. channel_agent-protocol_connect).
 
-  if (group) {
-    group.hooks = group.hooks.filter((h) => !isOurHook(h));
-    group.hooks.push({ type: 'command', command: hookPath });
-  } else {
-    settings.hooks.PostToolUse.push({ matcher: '', hooks: [{ type: 'command', command: hookPath }] });
+function installPiChannels({ mcpName, bridgePath, env }) {
+  const configPath = IDES['omp-channels'].configPath();
+  mkdirSync(dirname(configPath), { recursive: true });
+  const config = readJson(configPath);
+  config[mcpName] = { command: 'node', args: [bridgePath], env };
+  writeJsonAtomic(configPath, config);
+  console.error(`[agent-protocol] Updated channel "${mcpName}" in ${configPath} (OMP pi-channels)`);
+}
+
+// --- Codex: TOML [mcp_servers.X] ---
+// Strict section replacement: anchor on exact header, remove until the next
+// top-level [section] or EOF. Env vars go in a subtable [mcp_servers.X.env].
+
+function installCodex({ mcpName, bridgePath, env }) {
+  const path = IDES.codex.configPath();
+  mkdirSync(dirname(path), { recursive: true });
+  let toml = existsSync(path) ? readFileSync(path, 'utf8') : '';
+
+  const serverKey = mcpName.replace(/[^a-zA-Z0-9_-]/g, '-');
+  const header = `[mcp_servers.${serverKey}]`;
+  const envHeader = `[mcp_servers.${serverKey}.env]`;
+
+  // Remove existing section + any subtable (e.g. .env)
+  const lines = toml.split('\n');
+  const kept = [];
+  let inOurSection = false;
+  for (const line of lines) {
+    if (line.startsWith('[')) {
+      // Check if this line is our section or a subtable of it
+      if (line === header || line === envHeader || line.startsWith(`[mcp_servers.${serverKey}.`)) {
+        inOurSection = true;
+        continue;
+      }
+      inOurSection = false;
+    }
+    if (!inOurSection) kept.push(line);
   }
 
-  writeJsonAtomic(path, settings);
-  console.error(`[agent-protocol] Updated PostToolUse hook in ${path}`);
+  // Trim trailing blanks
+  while (kept.length > 0 && kept[kept.length - 1].trim() === '') kept.pop();
+
+  // Build new section
+  const escPath = tomlString(bridgePath);
+  let section = `\n${header}\ncommand = "node"\nargs = ["${escPath}"]`;
+  const envEntries = Object.entries(env);
+  if (envEntries.length > 0) {
+    section += `\n${envHeader}`;
+    for (const [key, value] of envEntries) {
+      section += `\n${key} = "${tomlString(value)}"`;
+    }
+  }
+
+  kept.push(section);
+  writeAtomic(path, kept.join('\n') + '\n');
+  console.error(`[agent-protocol] Updated MCP entry "${serverKey}" in ${path} (Codex CLI)`);
 }
+
+// --- Shared helpers ---
 
 function readJson(path) {
   if (!existsSync(path)) return {};
@@ -89,4 +239,64 @@ function writeJsonAtomic(path, obj) {
   const tmp = `${path}.tmp.${process.pid}.${Date.now()}`;
   writeFileSync(tmp, JSON.stringify(obj, null, 2));
   renameSync(tmp, path);
+}
+
+function writeAtomic(path, content) {
+  const tmp = `${path}.tmp.${process.pid}.${Date.now()}`;
+  writeFileSync(tmp, content);
+  renameSync(tmp, path);
+}
+
+function tomlString(str) {
+  // Escape backslashes and double quotes for TOML basic strings
+  return String(str).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
+// --- pi-channels plugin check and install ---
+
+function ensurePiChannelsInstalled() {
+  const pluginsPath = join(process.env.HOME, '.omp', 'plugins', 'package.json');
+  let installed = false;
+  if (existsSync(pluginsPath)) {
+    try {
+      const plugins = JSON.parse(readFileSync(pluginsPath, 'utf8'));
+      installed = !!plugins.dependencies && ('pi-channels' in plugins.dependencies || '@e9n/pi-channels' in plugins.dependencies);
+    } catch { /* ignore parse errors */ }
+  }
+
+  if (installed) {
+    console.error('[agent-protocol] pi-channels plugin already installed');
+    return;
+  }
+
+  // Prompt the user
+  process.stderr.write('\n[agent-protocol] The pi-channels plugin is required for OMP channel push.\n');
+  process.stderr.write('[agent-protocol] Install it now? [Y/n] ');
+
+  const answer = readLineSync();
+  if (answer.trim().toLowerCase() === 'n') {
+    console.error('[agent-protocol] Skipped. You can install it later with: omp install npm:pi-channels');
+    return;
+  }
+
+  console.error('[agent-protocol] Installing pi-channels...');
+  try {
+    execSync('omp install npm:pi-channels', { stdio: 'inherit' });
+    console.error('[agent-protocol] pi-channels installed successfully.');
+  } catch {
+    console.error('[agent-protocol] Failed to install pi-channels. Install it manually: omp install npm:pi-channels');
+  }
+}
+
+function readLineSync() {
+  // Read a single line from stdin synchronously
+  const fd = 0; // stdin
+  const buf = Buffer.alloc(1);
+  let line = '';
+  while (true) {
+    const n = readSync(fd, buf, 0, 1);
+    if (n === 0 || buf[0] === 0x0a) break; // EOF or newline
+    if (buf[0] !== 0x0d) line += buf.toString('utf8'); // skip CR
+  }
+  return line;
 }

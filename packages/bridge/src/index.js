@@ -14,6 +14,12 @@ const INBOX_BASE = join(AP_DIR, 'inbox');
 const NOTIFICATIONS_FILE = join(AP_DIR, 'notifications');
 
 const DEBUG = process.env.AGENT_PROTOCOL_DEBUG === '1';
+// Delivery mode: 'channel' (Claude Code), 'channel-pi' (OMP pi-channels),
+// 'poll' (Cursor/Codex), 'irc' (OMP default).
+// Controls whether we attempt MCP server-initiated channel push and how the
+// connect tool instructs the agent to listen for incoming messages.
+const DELIVERY_MODE = process.env.AGENT_PROTOCOL_DELIVERY || 'channel';
+const USE_CHANNEL = DELIVERY_MODE === 'channel' || DELIVERY_MODE === 'channel-pi';
 function log(event, data = {}) {
   if (!DEBUG) return;
   try {
@@ -154,6 +160,7 @@ function formatUpdateNotification(params) {
 // synchronously throw. If the client silently ignores the notification, we cannot
 // detect that here.
 function pushChannel(text, meta = {}) {
+  if (!USE_CHANNEL) return false;
   try {
     mcpServer.server.notification({
       method: 'notifications/claude/channel',
@@ -167,12 +174,12 @@ function pushChannel(text, meta = {}) {
   }
 }
 
-// Channel-first delivery with file + tool-result fallback.
-// On channel success, the message reaches the active Claude Code session
-// immediately and we do nothing else — avoids the historical triple-delivery
-// (channel + file + pendingNotifications) that surfaced the same message twice.
-// On channel failure, fall back to the file (PostToolUse hook drains it on
-// next tool call) AND pendingNotifications (piggybacked onto next tool result).
+// Delivery: channel push (Claude Code only) → file + pendingNotifications fallback.
+// In channel mode, a successful push reaches the active session immediately and
+// we skip the fallback to avoid double-delivery. In poll/irc mode, pushChannel
+// is a no-op, so every message goes to pendingNotifications (piggybacked onto the
+// next tool result) and the notifications file (drained by PostToolUse hook if
+// installed). The agent is also instructed at connect time to poll get_messages.
 function deliver(text, meta = {}) {
   messageEvents.emit('message');
   if (pushChannel(text, meta)) return;
@@ -180,33 +187,12 @@ function deliver(text, meta = {}) {
   writeNotificationToFile(text);
 }
 
-// --- MCP Server ---
-
-const mcpServer = new McpServer(
-  { name: 'agent-protocol-bridge', version: '1.0.0' },
-  {
-    capabilities: {
-      experimental: {
-        'claude/channel': {},
-      },
-    },
-  }
-);
-
-// -- Connection tools --
-
-mcpServer.registerTool('connect', {
-  description: 'Connect to an agent relay server',
-  inputSchema: {
-    relay_url: z.string().describe('Relay WebSocket URL (e.g., ws://localhost:8080)'),
-    name: z.string().describe('Agent name to register as'),
-    admin_key: z.string().describe('Relay admin key'),
-  },
-}, async (args) => {
-  try {
-    const result = await doConnect(args);
-    let text = JSON.stringify(result, null, 2);
-    text += `\n\n[SETUP REQUIRED: Spawn a background subagent to listen for incoming messages. IMPORTANT: Do NOT call get_messages with max_wait on the main thread — it will block you for minutes.
+// Post-connect instructions tailored to the delivery mode.
+// The bridge itself can't call SendMessage or irc — these are agent-host
+// tools. We instruct the agent to set up its own polling loop.
+function connectInstructions(mode) {
+  if (mode === 'channel') {
+    return `[SETUP REQUIRED: Spawn a background subagent to listen for incoming messages. IMPORTANT: Do NOT call get_messages with max_wait on the main thread — it will block you for minutes.
 
 Use the Agent tool with run_in_background: true and this exact prompt:
 
@@ -227,6 +213,76 @@ IMPORTANT:
 - If get_messages times out with no messages, just call it again."
 
 Do NOT call get_messages with max_wait on the main thread yourself under any circumstances.]`;
+  }
+
+  if (mode === 'channel-pi') {
+    // OMP with pi-channels: messages arrive instantly as <channel> tags.
+    // No background subagent or polling needed. Tools are proxied as
+    // channel_<mcp-name>_<tool> by pi-channels.
+    const mcpName = process.env.AGENT_PROTOCOL_MCP_NAME || 'agent-protocol';
+    const toolPrefix = `channel_${mcpName}`;
+    return `[Connected to agent relay via pi-channels. Messages from other agents will arrive instantly as <channel source="${mcpName}"> tags in your conversation — no polling needed.
+
+To send a message to another agent, use ${toolPrefix}_send_message.
+To reply to a received task, use ${toolPrefix}_update_task.
+To list connected agents, use ${toolPrefix}_list_agents.
+To broadcast, use ${toolPrefix}_broadcast.
+
+When you receive a <channel> message, act on it and reply using ${toolPrefix}_update_task with the taskId from the message.]`;
+  }
+
+  if (mode === 'irc') {
+    return `[SETUP REQUIRED: Spawn a background task subagent to listen for incoming messages. IMPORTANT: Do NOT call get_messages with max_wait on the main thread — it will block you for minutes.
+
+Use the task tool to spawn a background subagent with this exact prompt:
+
+"You are a background message poller. Follow these steps exactly.
+
+SETUP — discover your tools first:
+1. Use search_tool_bm25 or equivalent to find and activate the mcp__agent-protocol__get_messages tool.
+
+LOOP:
+1. Call mcp__agent-protocol__get_messages(max_wait: 300)
+2. If a message is returned, call irc with op: \\"send\\", to: \\"Main\\", message: \\"<full message content>\\" to forward it to the main thread.
+3. Go to step 1.
+
+IMPORTANT:
+- irc is an INTERNAL tool for talking to the main thread. It is NOT mcp__agent-protocol__send_message (that sends to external relay agents).
+- Do not interpret or filter messages. Forward everything verbatim.
+- If get_messages times out with no messages, just call it again."
+
+Do NOT call get_messages with max_wait on the main thread yourself under any circumstances.]`;
+  }
+
+  // poll mode (Cursor, Codex) — no background subagent available
+  return `[SETUP: You are now connected to the agent relay. Messages from other agents arrive via get_messages.
+
+To receive messages, periodically call mcp__agent-protocol__get_messages (without max_wait, or with a small max_wait like 5-10) between your tasks. There is no background subagent or channel push available in this environment, so you must poll actively.
+
+When you send a message to another agent via send_message, call get_messages with max_wait: 30-60 afterwards to listen for the reply.]`;
+}
+
+// --- MCP Server ---
+
+const mcpServer = new McpServer(
+  { name: 'agent-protocol-bridge', version: '1.0.0' },
+  USE_CHANNEL ? { capabilities: { experimental: { 'claude/channel': {} } } } : {},
+);
+
+// -- Connection tools --
+
+mcpServer.registerTool('connect', {
+  description: 'Connect to an agent relay server',
+  inputSchema: {
+    relay_url: z.string().describe('Relay WebSocket URL (e.g., ws://localhost:8080)'),
+    name: z.string().describe('Agent name to register as'),
+    admin_key: z.string().describe('Relay admin key'),
+  },
+}, async (args) => {
+  try {
+    const result = await doConnect(args);
+    let text = JSON.stringify(result, null, 2);
+    text += `\n\n${connectInstructions(DELIVERY_MODE)}`;
     return { content: [{ type: 'text', text }] };
   } catch (err) {
     log('connect_failed', { error: err.message });

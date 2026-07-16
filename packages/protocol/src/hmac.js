@@ -12,14 +12,15 @@ function sortKeys(value) {
   return sorted;
 }
 
-export function signMessage(secret, timestamp, params) {
+export function signMessage(secret, { id, method, from, to, timestamp, params }) {
   const canonical = canonicalizeParams(params);
-  const signingInput = `${String(timestamp)}.${canonical}`;
+  const toField = to ?? '';
+  const signingInput = `${id}.${from}.${toField}.${method}.${String(timestamp)}.${canonical}`;
   return createHmac('sha256', secret).update(signingInput, 'utf8').digest('base64');
 }
 
-export function verifySignature(secret, timestamp, params, signature) {
-  const expected = signMessage(secret, timestamp, params);
+export function verifySignature(secret, envelope, signature) {
+  const expected = signMessage(secret, envelope);
   const expectedBuf = Buffer.from(expected);
   const actualBuf = Buffer.from(signature);
   if (expectedBuf.length !== actualBuf.length) return false;
