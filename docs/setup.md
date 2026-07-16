@@ -4,7 +4,7 @@
 
 A communication protocol that lets multiple AI coding agents talk to each other across machines. One instance can say "I fixed the API endpoint" and another can run Playwright tests and report back — all automatically.
 
-Supports Claude Code, Cursor, Codex CLI, and Oh My Pi (OMP).
+Supports Claude Code, Cursor, Codex CLI, Oh My Pi (OMP), and Pi.
 
 ## Architecture
 
@@ -79,11 +79,14 @@ This copies the bridge bundle to `~/.agent-protocol/bin/`, registers the MCP ser
 | `cursor` | `~/.cursor/mcp.json` | Poll | `cursor` |
 | `codex` | `~/.codex/config.toml` | Poll | `codex` |
 | `omp` | `~/.omp/agent/mcp.json` | IRC poll | `omp` |
-| `pi` (alias for `omp`) | — | — | — |
+| `pi` | `.pi-channels.json` (project dir) | Channel push (instant) | `pi --channels agent-protocol` (from project dir) |
 
 #### Delivery Modes
 
-**Channel push** (Claude Code): Messages arrive instantly via MCP server-initiated `notifications/claude/channel`. The agent spawns a background subagent that polls `get_messages` and forwards incoming messages to the main thread via `SendMessage`. No manual polling needed.
+**Channel push** (Claude Code, Pi): Messages arrive instantly via MCP server-initiated `notifications/claude/channel`. No polling required. The agent sees incoming messages as channel notifications in its conversation.
+
+- **Claude Code**: Spawns a background subagent that polls `get_messages` and forwards via `SendMessage` to the main thread.
+- **Pi**: Messages arrive as `<channel source="agent-protocol">` tags — no subagent or polling needed. The pi-channels plugin proxies tools as `channel_agent-protocol_*`.
 
 **Poll** (Cursor, Codex): No channel push available. The agent polls `get_messages` between tasks. After sending a message, call `get_messages` with `max_wait: 30-60` to listen for the reply.
 
@@ -101,6 +104,22 @@ Options:
   --with-hook        Install PostToolUse hook for Claude Code (optional safety net)
 ```
 
+#### Pi (channel push via pi-channels)
+
+The `pi` setup writes `.pi-channels.json` in the **project directory** (pi-channels reads it from `ctx.cwd`). If the `pi-channels` plugin is not installed, the setup script prompts to install it:
+
+```bash
+node packages/cli/src/index.js setup pi
+```
+
+Then launch pi from the same project directory:
+
+```bash
+pi --channels agent-protocol
+```
+
+Messages arrive instantly as `<channel source="agent-protocol">` tags. Tools are available as `channel_agent-protocol_*` (e.g., `channel_agent-protocol_connect`, `channel_agent-protocol_send_message`).
+
 ### 4. Verify
 
 **Claude Code**: Run `/mcp` — you should see `agent-protocol` with status `Connected`.
@@ -110,6 +129,8 @@ Options:
 **Codex**: Run `codex mcp list` — you should see `agent-protocol`.
 
 **OMP**: Run `/mcp` — you should see `agent-protocol`.
+
+**Pi**: Run `/channels` — you should see `agent-protocol` listed as an active channel.
 
 ## Usage
 
@@ -132,6 +153,7 @@ You'll see a confirmation with the list of already-connected agents.
 
 **After connecting**, the bridge provides mode-specific instructions:
 - **Channel push** (Claude Code): Spawns a background subagent that polls `get_messages` and forwards via `SendMessage` to the main thread.
+- **Channel push** (Pi): Messages arrive as `<channel>` tags — no polling or subagent needed.
 - **IRC poll** (OMP): Spawns a background task subagent that polls `get_messages` and forwards via `irc`.
 - **Poll** (Cursor/Codex): The agent polls `get_messages` between tasks.
 
@@ -150,6 +172,8 @@ The agent calls `send_message`, gets delivery confirmation.
 How messages arrive depends on the delivery mode:
 
 **Channel push** (Claude Code): Messages appear instantly in the conversation as channel notifications. Sub-second delivery.
+
+**Channel push** (Pi): Messages arrive instantly as `<channel source="agent-protocol">` tags in the session. No polling needed.
 
 **IRC poll** (OMP): The background subagent polls `get_messages(max_wait: 300)`. When a message arrives, the event emitter wakes the poller in sub-second time. The subagent forwards the message to the main thread via `irc`.
 
@@ -215,27 +239,28 @@ claude --dangerously-load-development-channels server:agent-protocol
 > Connect to agent relay at ws://localhost:8080 as backend-gpu with admin key <key>
 ```
 
-### Machine B (local dev machine, OMP)
+### Machine B (local dev machine, Pi)
 
 ```bash
 # Copy the bridge file
 scp user@machine-a:/path/to/dist/agent-protocol-bridge.mjs ~/
 
-# Setup OMP
-node packages/cli/src/index.js setup omp
+# Setup pi (writes .pi-channels.json in current dir, installs pi-channels if needed)
+cd /path/to/your/project
+node packages/cli/src/index.js setup pi
 
 # If relay is on machine A, connect via SSH tunnel:
 ssh -L 8080:localhost:8080 user@machine-a
 
-# Start OMP
-omp
+# Start pi with channels
+pi --channels agent-protocol
 
-# In OMP:
+# In Pi:
 > Connect to agent relay at ws://localhost:8080 as local-test with admin key <key>
 > Send message to backend-gpu: "Can you fix the auth bug in api/users.py?"
 ```
 
-Messages from backend-gpu arrive via the background polling subagent and are forwarded to the main OMP thread via `irc`. Replies go back via `update_task`.
+Messages from backend-gpu arrive instantly as `<channel>` tags in the pi session. Replies go back via `channel_agent-protocol_update_task`.
 
 ## SSH Tunneling
 
@@ -269,6 +294,11 @@ Channel push mode (Claude Code):
   → Agent sees message instantly in conversation
   → No polling needed
 
+Channel push mode (Pi with pi-channels):
+  → Bridge B sends notifications/claude/channel
+  → pi-channels injects <channel source="agent-protocol"> tag
+  → Agent sees message instantly — no polling or subagent
+
 IRC poll mode (OMP):
   → Background task subagent blocked on get_messages(max_wait: 300)
   → Event resolves the blocking call instantly
@@ -286,6 +316,7 @@ Poll mode (Cursor, Codex):
 - Cursor: Check `~/.cursor/mcp.json`
 - Codex: Check `~/.codex/config.toml` has the `[mcp_servers.agent-protocol]` section
 - OMP: Check `~/.omp/agent/mcp.json`
+- Pi: Check `.pi-channels.json` in your project directory and ensure you launched with `pi --channels agent-protocol`
 - Verify the file exists and Node.js can run it: `node /path/to/agent-protocol-bridge.mjs` (should hang waiting for stdin — that's correct, Ctrl+C to stop)
 
 **Connection failed:**
@@ -298,6 +329,13 @@ Poll mode (Cursor, Codex):
 - Call `list_agents` to see who's connected
 - Call `get_messages` to explicitly check the inbox
 - Check `cat ~/.agent-protocol/notifications` — if the file has content, the bridge received the message but the agent hasn't read it yet
+
+**Pi channels not working:**
+- Ensure pi-channels plugin is installed: `pi install npm:pi-channels`
+- Launch with the `--channels` flag: `pi --channels agent-protocol`
+- Run `/channels` in pi to see active channels
+- Tools appear as `channel_agent-protocol_*`, not `mcp__agent-protocol__*`
+- `.pi-channels.json` must be in the project directory where pi is launched
 
 **OMP messages not forwarded:**
 - Ensure the background task subagent was spawned (the connect response includes instructions for this)

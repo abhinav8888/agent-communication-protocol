@@ -24943,7 +24943,7 @@ var INBOX_BASE = join2(AP_DIR, "inbox");
 var NOTIFICATIONS_FILE = join2(AP_DIR, "notifications");
 var DEBUG = process.env.AGENT_PROTOCOL_DEBUG === "1";
 var DELIVERY_MODE = process.env.AGENT_PROTOCOL_DELIVERY || "channel";
-var USE_CHANNEL = DELIVERY_MODE === "channel";
+var USE_CHANNEL = DELIVERY_MODE === "channel" || DELIVERY_MODE === "channel-pi";
 function log(event, data = {}) {
   if (!DEBUG) return;
   try {
@@ -25115,6 +25115,18 @@ IMPORTANT:
 - If get_messages times out with no messages, just call it again."
 
 Do NOT call get_messages with max_wait on the main thread yourself under any circumstances.]`;
+  }
+  if (mode === "channel-pi") {
+    const mcpName = process.env.AGENT_PROTOCOL_MCP_NAME || "agent-protocol";
+    const toolPrefix = `channel_${mcpName}`;
+    return `[Connected to agent relay via pi-channels. Messages from other agents will arrive instantly as <channel source="${mcpName}"> tags in your conversation \u2014 no polling needed.
+
+To send a message to another agent, use ${toolPrefix}_send_message.
+To reply to a received task, use ${toolPrefix}_update_task.
+To list connected agents, use ${toolPrefix}_list_agents.
+To broadcast, use ${toolPrefix}_broadcast.
+
+When you receive a <channel> message, act on it and reply using ${toolPrefix}_update_task with the taskId from the message.]`;
   }
   if (mode === "irc") {
     return `[SETUP REQUIRED: Spawn a background task subagent to listen for incoming messages. IMPORTANT: Do NOT call get_messages with max_wait on the main thread \u2014 it will block you for minutes.

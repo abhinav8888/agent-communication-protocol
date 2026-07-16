@@ -14,11 +14,12 @@ const INBOX_BASE = join(AP_DIR, 'inbox');
 const NOTIFICATIONS_FILE = join(AP_DIR, 'notifications');
 
 const DEBUG = process.env.AGENT_PROTOCOL_DEBUG === '1';
-// Delivery mode: 'channel' (Claude Code), 'poll' (Cursor/Codex), 'irc' (OMP).
+// Delivery mode: 'channel' (Claude Code), 'channel-pi' (pi with pi-channels),
+// 'poll' (Cursor/Codex), 'irc' (OMP).
 // Controls whether we attempt MCP server-initiated channel push and how the
 // connect tool instructs the agent to listen for incoming messages.
 const DELIVERY_MODE = process.env.AGENT_PROTOCOL_DELIVERY || 'channel';
-const USE_CHANNEL = DELIVERY_MODE === 'channel';
+const USE_CHANNEL = DELIVERY_MODE === 'channel' || DELIVERY_MODE === 'channel-pi';
 function log(event, data = {}) {
   if (!DEBUG) return;
   try {
@@ -212,6 +213,22 @@ IMPORTANT:
 - If get_messages times out with no messages, just call it again."
 
 Do NOT call get_messages with max_wait on the main thread yourself under any circumstances.]`;
+  }
+
+  if (mode === 'channel-pi') {
+    // pi with pi-channels: messages arrive instantly as <channel> tags.
+    // No background subagent or polling needed. Tools are proxied as
+    // channel_<mcp-name>_<tool> by pi-channels.
+    const mcpName = process.env.AGENT_PROTOCOL_MCP_NAME || 'agent-protocol';
+    const toolPrefix = `channel_${mcpName}`;
+    return `[Connected to agent relay via pi-channels. Messages from other agents will arrive instantly as <channel source="${mcpName}"> tags in your conversation — no polling needed.
+
+To send a message to another agent, use ${toolPrefix}_send_message.
+To reply to a received task, use ${toolPrefix}_update_task.
+To list connected agents, use ${toolPrefix}_list_agents.
+To broadcast, use ${toolPrefix}_broadcast.
+
+When you receive a <channel> message, act on it and reply using ${toolPrefix}_update_task with the taskId from the message.]`;
   }
 
 
