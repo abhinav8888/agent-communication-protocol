@@ -1,6 +1,5 @@
 import { Command } from 'commander';
-import { copyFileSync, chmodSync, mkdirSync, existsSync, readFileSync, readSync, writeFileSync, renameSync } from 'node:fs';
-import { execSync } from 'node:child_process';
+import { copyFileSync, chmodSync, mkdirSync, existsSync, readFileSync, writeFileSync, renameSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -38,20 +37,14 @@ const IDES = {
     configPath: () => join(process.env.HOME, '.omp', 'agent', 'mcp.json'),
     hint: 'Restart OMP to pick up the new MCP server.',
   },
-  'omp-channels': {
-    label: 'Oh My Pi (channels)',
-    delivery: 'channel-pi',
-    configPath: () => join(process.env.HOME, '.pi-channels.json'),
-    hint: 'Install pi-channels plugin: pi install npm:pi-channels\nThen launch OMP from any project with: omp --channels agent-protocol',
-  },
 };
 
-// Aliases: 'pi' → 'omp', 'pi-channels' → 'omp-channels'
-const IDE_ALIASES = { pi: 'omp', 'pi-channels': 'omp-channels' };
+// Alias: 'pi' is shorthand for 'omp' (Oh My Pi)
+const IDE_ALIASES = { pi: 'omp' };
 
 export const setupCommand = new Command('setup')
   .description('Install the agent-protocol bridge for one or more IDEs')
-  .argument('[ides...]', 'IDEs to set up (claude-code, cursor, codex, omp, omp-channels)', ['claude-code'])
+  .argument('[ides...]', 'IDEs to set up (claude-code, cursor, codex, omp)', ['claude-code'])
   .option('--dest <dir>', 'Where to copy the bridge bundle', join(process.env.HOME, '.agent-protocol', 'bin'))
   .option('--mcp-name <name>', 'MCP server name in IDE config', 'agent-protocol')
   .option('--debug', 'Set AGENT_PROTOCOL_DEBUG=1 in the MCP server env')
@@ -92,16 +85,9 @@ export const setupCommand = new Command('setup')
       chmodSync(hookDest, 0o755);
       console.error(`[agent-protocol] Installed hook   → ${hookDest}`);
     }
-    // For omp-channels: check if pi-channels plugin is installed, prompt if not
-    if (uniqueIdes.includes('omp-channels')) {
-      ensurePiChannelsInstalled();
-    }
-
-
     for (const ide of uniqueIdes) {
       const def = IDES[ide];
       const env = { AGENT_PROTOCOL_DELIVERY: def.delivery };
-      if (def.delivery === 'channel-pi') env.AGENT_PROTOCOL_MCP_NAME = opts.mcpName;
       if (opts.debug) env.AGENT_PROTOCOL_DEBUG = '1';
 
       const writers = {
@@ -109,7 +95,6 @@ export const setupCommand = new Command('setup')
         cursor: () => installJsonMcp({ def, mcpName: opts.mcpName, bridgePath: bridgeDest, env }),
         codex: () => installCodex({ mcpName: opts.mcpName, bridgePath: bridgeDest, env }),
         omp: () => installJsonMcp({ def, mcpName: opts.mcpName, bridgePath: bridgeDest, env }),
-        'omp-channels': () => installPiChannels({ mcpName: opts.mcpName, bridgePath: bridgeDest, env }),
       };
       writers[ide]();
     }
@@ -166,19 +151,6 @@ function installJsonMcp({ def, mcpName, bridgePath, env }) {
   console.error(`[agent-protocol] Updated MCP entry "${mcpName}" in ${path} (${def.label})`);
 }
 
-// --- OMP pi-channels: global ~/.pi-channels.json ---
-// The bridge acts as a channel server: pi-channels spawns it as a subprocess,
-// receives notifications/claude/channel pushes, and injects them as <channel> tags.
-// Tools are proxied as channel_<name>_<tool> (e.g. channel_agent-protocol_connect).
-
-function installPiChannels({ mcpName, bridgePath, env }) {
-  const configPath = IDES['omp-channels'].configPath();
-  mkdirSync(dirname(configPath), { recursive: true });
-  const config = readJson(configPath);
-  config[mcpName] = { command: 'node', args: [bridgePath], env };
-  writeJsonAtomic(configPath, config);
-  console.error(`[agent-protocol] Updated channel "${mcpName}" in ${configPath} (OMP pi-channels)`);
-}
 
 // --- Codex: TOML [mcp_servers.X] ---
 // Strict section replacement: anchor on exact header, remove until the next
@@ -252,51 +224,3 @@ function tomlString(str) {
   return String(str).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 }
 
-// --- pi-channels plugin check and install ---
-
-function ensurePiChannelsInstalled() {
-  const pluginsPath = join(process.env.HOME, '.omp', 'plugins', 'package.json');
-  let installed = false;
-  if (existsSync(pluginsPath)) {
-    try {
-      const plugins = JSON.parse(readFileSync(pluginsPath, 'utf8'));
-      installed = !!plugins.dependencies && ('pi-channels' in plugins.dependencies || '@e9n/pi-channels' in plugins.dependencies);
-    } catch { /* ignore parse errors */ }
-  }
-
-  if (installed) {
-    console.error('[agent-protocol] pi-channels plugin already installed');
-    return;
-  }
-
-  // Prompt the user
-  process.stderr.write('\n[agent-protocol] The pi-channels plugin is required for OMP channel push.\n');
-  process.stderr.write('[agent-protocol] Install it now? [Y/n] ');
-
-  const answer = readLineSync();
-  if (answer.trim().toLowerCase() === 'n') {
-    console.error('[agent-protocol] Skipped. You can install it later with: omp install npm:pi-channels');
-    return;
-  }
-
-  console.error('[agent-protocol] Installing pi-channels...');
-  try {
-    execSync('omp install npm:pi-channels', { stdio: 'inherit' });
-    console.error('[agent-protocol] pi-channels installed successfully.');
-  } catch {
-    console.error('[agent-protocol] Failed to install pi-channels. Install it manually: omp install npm:pi-channels');
-  }
-}
-
-function readLineSync() {
-  // Read a single line from stdin synchronously
-  const fd = 0; // stdin
-  const buf = Buffer.alloc(1);
-  let line = '';
-  while (true) {
-    const n = readSync(fd, buf, 0, 1);
-    if (n === 0 || buf[0] === 0x0a) break; // EOF or newline
-    if (buf[0] !== 0x0d) line += buf.toString('utf8'); // skip CR
-  }
-  return line;
-}
