@@ -2,21 +2,23 @@
 
 ## What This Is
 
-A communication protocol that lets multiple Claude Code instances talk to each other across machines. One instance can say "I fixed the API endpoint" and another can run Playwright tests and report back — all automatically.
+A communication protocol that lets multiple AI coding agents talk to each other across machines. One instance can say "I fixed the API endpoint" and another can run Playwright tests and report back — all automatically.
+
+Supports Claude Code, Cursor, Codex CLI, and Oh My Pi (OMP).
 
 ## Architecture
 
 ```
-Claude Code A ←→ Bridge (MCP) ←→ Relay Server ←→ Bridge (MCP) ←→ Claude Code B
+Agent A ←→ Bridge (MCP) ←→ Relay Server ←→ Bridge (MCP) ←→ Agent B
 ```
 
 - **Relay Server**: Lightweight message router. Runs anywhere all agents can reach.
-- **Bridge**: MCP server that runs inside each Claude Code session. Starts disconnected. Each session connects with its own identity at runtime.
+- **Bridge**: MCP server that runs inside each agent session. Starts disconnected. Each session connects with its own identity at runtime.
 
 ## Prerequisites
 
 - Node.js >= 18 on the machine running the relay
-- Node.js >= 18 on each machine running Claude Code (for the bridge MCP server)
+- Node.js >= 18 on each machine running a bridge
 
 ## Setup
 
@@ -30,14 +32,13 @@ npm install
 npm run build
 ```
 
-This produces `dist/agent-protocol-bridge.mjs` (~844KB, zero dependencies). Rebuild after any code changes.
+This produces `dist/agent-protocol-bridge.mjs` (~852KB, zero dependencies). Rebuild after any code changes.
 
 ### 2. Start the Relay Server
 
 On any machine reachable by all agents:
 
 ```bash
-cd /path/to/agent-protocol
 node packages/cli/src/index.js relay --port 8080
 ```
 
@@ -54,92 +55,96 @@ You can also provide your own key:
 node packages/cli/src/index.js relay --port 8080 --admin-key my-secret-key
 ```
 
-### 3. Install the Bridge on Each Machine
+### 3. Install the Bridge for Your IDE
 
-**Quick install (automated):** on the target machine, from a checkout of this repo:
-
-```bash
-npm run build  # produces dist/agent-protocol-bridge.mjs (skip if already built)
-node packages/cli/src/index.js setup           # adds MCP entry + PostToolUse hook
-node packages/cli/src/index.js setup --debug   # same, but enables AGENT_PROTOCOL_DEBUG=1
-```
-
-This copies `dist/agent-protocol-bridge.mjs` and `hooks/check-notifications.sh` into `~/.agent-protocol/bin/`, registers the bridge under `mcpServers.agent-protocol` in `~/.claude.json`, and appends the PostToolUse hook to `~/.claude/settings.json`. Re-running it updates the entries in place. Skip ahead to step 4 (Verify) after this.
-
-To enable channels (research preview), launch Claude Code with:
+Run the setup command on each machine, specifying one or more IDEs:
 
 ```bash
-claude --dangerously-load-development-channels server:agent-protocol
+node packages/cli/src/index.js setup claude-code
 ```
 
-**Manual install:** copy a single file to each machine that will run Claude Code:
+Multiple IDEs at once:
 
 ```bash
-# From the project directory, the bundle is at:
-dist/agent-protocol-bridge.mjs    # ~844KB, zero dependencies, just needs Node.js
+node packages/cli/src/index.js setup claude-code cursor codex omp
 ```
 
-Place it anywhere on the target machine (e.g., `~/agent-protocol-bridge.mjs`).
+This copies the bridge bundle to `~/.agent-protocol/bin/`, registers the MCP server in each IDE's config file, and sets the appropriate delivery mode. Re-running updates entries in place.
 
-### 4. Configure Claude Code
+#### Supported IDEs
 
-On each machine, two config files to edit:
+| IDE | Config file | Delivery | Launch |
+|-----|------------|----------|-------|
+| `claude-code` | `~/.claude.json` | Channel push (instant) | `claude --dangerously-load-development-channels server:agent-protocol` |
+| `cursor` | `~/.cursor/mcp.json` | Poll | `cursor` |
+| `codex` | `~/.codex/config.toml` | Poll | `codex` |
+| `omp` | `~/.omp/agent/mcp.json` | IRC poll | `omp` |
+| `omp-channels` | `~/.pi-channels.json` | Channel push (instant) | `omp --channels agent-protocol` |
+| `pi` (alias for `omp`) | — | — | — |
+| `pi-channels` (alias for `omp-channels`) | — | — | — |
 
-**a) MCP server** — add to `~/.claude.json`:
+#### Delivery Modes
 
-```json
-{
-  "mcpServers": {
-    "agent-protocol": {
-      "command": "node",
-      "args": ["/path/to/agent-protocol-bridge.mjs"]
-    }
-  }
-}
+**Channel push** (Claude Code, OMP with pi-channels): Messages arrive instantly via MCP server-initiated `notifications/claude/channel`. No polling required. The agent sees incoming messages as channel notifications in its conversation.
+
+**Poll** (Cursor, Codex): No channel push available. The agent polls `get_messages` between tasks. After sending a message, call `get_messages` with `max_wait: 30-60` to listen for the reply.
+
+**IRC poll** (OMP default): A background task subagent polls `get_messages(max_wait: 300)` and forwards incoming messages to the main thread via `irc`. Works out of the box, no plugins needed.
+
+#### Options
+
+```bash
+node packages/cli/src/index.js setup [ides...] [options]
+
+Options:
+  --dest <dir>       Where to copy the bridge bundle (default: ~/.agent-protocol/bin)
+  --mcp-name <name>  MCP server name in IDE config (default: agent-protocol)
+  --debug            Enable AGENT_PROTOCOL_DEBUG=1 in the bridge env
+  --with-hook        Install PostToolUse hook for Claude Code (optional safety net)
 ```
 
-If `~/.claude.json` already exists with other config, just add the `agent-protocol` entry inside the existing `mcpServers` object.
+#### OMP with pi-channels (instant push)
 
-**b) Trust the MCP tools** — add to `~/.claude/settings.json` inside the `permissions.allow` array:
+For instant push delivery on OMP (instead of IRC polling), use `omp-channels`:
 
-```json
-{
-  "permissions": {
-    "allow": [
-      "mcp__agent-protocol__connect",
-      "mcp__agent-protocol__disconnect",
-      "mcp__agent-protocol__send_message",
-      "mcp__agent-protocol__broadcast",
-      "mcp__agent-protocol__update_task",
-      "mcp__agent-protocol__wait_for_messages",
-      "mcp__agent-protocol__check_messages",
-      "mcp__agent-protocol__list_agents",
-      "mcp__agent-protocol__discover_agents",
-      "mcp__agent-protocol__get_messages",
-      "mcp__agent-protocol__get_task_status",
-      "mcp__agent-protocol__get_connection_status"
-    ]
-  }
-}
+```bash
+node packages/cli/src/index.js setup omp-channels
 ```
 
-If `settings.json` already has a `permissions.allow` array, append these entries to it. This is required so that subagents (used for background message listening) can access the agent-protocol tools without being blocked.
+This writes `~/.pi-channels.json` and checks if the `pi-channels` plugin is installed. If not, it prompts to install it:
 
-Restart Claude Code after editing both files.
+```
+[agent-protocol] The pi-channels plugin is required for OMP channel push.
+[agent-protocol] Install it now? [Y/n]
+```
 
-### 5. Verify
+Then launch OMP with:
 
-In Claude Code, run `/mcp` — you should see `agent-protocol` with status `Connected`.
+```bash
+omp --channels agent-protocol
+```
+
+Messages arrive instantly as `<channel source="agent-protocol">` tags. Tools are available as `channel_agent-protocol_*` (e.g., `channel_agent-protocol_connect`, `channel_agent-protocol_send_message`).
+
+### 4. Verify
+
+**Claude Code**: Run `/mcp` — you should see `agent-protocol` with status `Connected`.
+
+**Cursor**: Check Settings > MCP — you should see `agent-protocol`.
+
+**Codex**: Run `codex mcp list` — you should see `agent-protocol`.
+
+**OMP**: Run `/mcp` — you should see `agent-protocol`.
 
 ## Usage
 
 ### Connecting to the Relay
 
-In any Claude Code session, tell it:
+In any agent session, tell it:
 
 > Connect to the agent relay at ws://relay-host:8080 as backend-gpu with admin key a1b2c3d4e5
 
-Claude Code will call the `connect` tool:
+The agent calls the `connect` tool:
 ```
 connect({
   relay_url: "ws://relay-host:8080",
@@ -150,32 +155,33 @@ connect({
 
 You'll see a confirmation with the list of already-connected agents.
 
-**After connecting**, the bridge instructs Claude Code to set up a recurring message poll:
-```
-CronCreate({ cron: "*/2 * * * *", prompt: "call check_messages to check for incoming agent messages" })
-```
+**After connecting**, the bridge provides mode-specific instructions:
+- **Channel push** (Claude Code): Spawns a background subagent that polls `get_messages` and forwards via `SendMessage` to the main thread.
+- **Channel push** (OMP pi-channels): Messages arrive as `<channel>` tags — no polling or subagent needed.
+- **IRC poll** (OMP): Spawns a background task subagent that polls `get_messages` and forwards via `irc`.
+- **Poll** (Cursor/Codex): The agent polls `get_messages` between tasks.
 
-This ensures messages are received even when idle. Claude Code will do this automatically based on the connect response.
-
-Each Claude Code session picks its own agent name. Multiple sessions on the same machine can use different names — no conflicts.
+Each session picks its own agent name. Multiple sessions on the same machine can use different names — no conflicts.
 
 ### Sending Messages
 
-Once connected, tell Claude Code:
+Once connected, tell the agent:
 
 > Send a message to local-test: "I fixed the /users endpoint, can you run the Playwright login tests?"
 
-Claude Code calls `send_message`, gets delivery confirmation, then automatically calls `wait_for_messages` to listen for the reply.
+The agent calls `send_message`, gets delivery confirmation.
 
 ### Receiving Messages
 
-Messages arrive through two mechanisms:
+How messages arrive depends on the delivery mode:
 
-**1. Active listening (instant):** After sending a message or completing a task, Claude Code calls `wait_for_messages` which blocks for up to 90 seconds. If a reply arrives via the relay during that time, it resolves instantly — sub-second delivery. This does NOT block the main thread permanently — it's a one-shot wait after sending.
+**Channel push** (Claude Code, OMP pi-channels): Messages appear instantly in the conversation as channel notifications. Sub-second delivery.
 
-**2. Idle polling (every 2 minutes):** The CronCreate job fires every 2 minutes when Claude Code is idle, calling `check_messages` — a **non-blocking** instant check. If messages are pending, they're returned. If not, it returns immediately and Claude Code is free to accept user input. This keeps the main thread unblocked.
+**IRC poll** (OMP): The background subagent polls `get_messages(max_wait: 300)`. When a message arrives, the event emitter wakes the poller in sub-second time. The subagent forwards the message to the main thread via `irc`.
 
-When a message arrives, Claude Code sees:
+**Poll** (Cursor, Codex): The agent must actively call `get_messages` between tasks. After sending a message, call `get_messages` with `max_wait: 30-60` to listen for the reply.
+
+When a message arrives, the agent sees:
 
 ```
 ── Incoming from backend-gpu (task: abc-123) ──────────────────
@@ -192,14 +198,14 @@ text: "your response here" })]
 ───────────────────────────────────────────────
 ```
 
-Claude Code acts on the request, then calls `update_task` to send the result back. After updating, it calls `wait_for_messages` again to listen for the next message.
+The agent acts on the request, then calls `update_task` to send the result back.
 
 ### Specialized Idle Agents
 
 For agents that sit idle until activated (e.g., a Playwright test runner):
 
 1. Connect to the relay with a descriptive name
-2. The CronCreate poll handles everything — the agent wakes up when a message arrives, does its work, replies, and goes back to listening
+2. The delivery mechanism handles everything — the agent wakes up when a message arrives, does its work, replies, and goes back to listening
 
 No manual intervention needed after the initial connect.
 
@@ -212,52 +218,50 @@ No manual intervention needed after the initial connect.
 | `send_message` | Send a message to a specific agent |
 | `broadcast` | Send to all connected agents |
 | `update_task` | Reply to a received task (working/completed/failed) |
-| `check_messages` | Non-blocking check for pending messages (used by cron) |
-| `wait_for_messages` | Block until a message arrives, max 90s (used after send) |
+| `get_messages` | Get messages from inbox (returns immediately by default, or blocks with `max_wait`) |
 | `list_agents` | List all connected peers |
 | `discover_agents` | Find peers by skill tag |
-| `get_messages` | Get unread messages from inbox |
 | `get_task_status` | Check status of a sent/received task |
 | `get_connection_status` | Check if connected to relay |
 
 ## Example: Two-Machine Setup
 
-### Machine A (remote GPU server)
+### Machine A (remote GPU server, Claude Code)
 
 ```bash
 # Terminal 1: Start relay
 node packages/cli/src/index.js relay --port 8080
 # Note the admin key
 
-# Terminal 2: Start Claude Code
-claude
+# Terminal 2: Setup and start Claude Code
+node packages/cli/src/index.js setup claude-code
+claude --dangerously-load-development-channels server:agent-protocol
 
 # In Claude Code:
 > Connect to agent relay at ws://localhost:8080 as backend-gpu with admin key <key>
 ```
 
-Claude Code connects, sets up the cron poll, and is now listening for messages.
-
-### Machine B (local dev machine)
+### Machine B (local dev machine, OMP with channels)
 
 ```bash
 # Copy the bridge file
 scp user@machine-a:/path/to/dist/agent-protocol-bridge.mjs ~/
 
-# Add to ~/.claude.json (see step 3 above)
+# Setup OMP with channel push
+node packages/cli/src/index.js setup omp-channels
 
 # If relay is on machine A, connect via SSH tunnel:
 ssh -L 8080:localhost:8080 user@machine-a
 
-# Start Claude Code
-claude
+# Start OMP with channels
+omp --channels agent-protocol
 
-# In Claude Code:
+# In OMP:
 > Connect to agent relay at ws://localhost:8080 as local-test with admin key <key>
 > Send message to backend-gpu: "Can you fix the auth bug in api/users.py?"
 ```
 
-Claude Code on Machine B sends the message, then calls `wait_for_messages`. When backend-gpu on Machine A finishes and replies, the response appears instantly.
+Messages from backend-gpu arrive instantly as `<channel>` tags in the OMP session. Replies go back via `channel_agent-protocol_update_task`.
 
 ## SSH Tunneling
 
@@ -273,7 +277,7 @@ ssh -L 8080:localhost:8080 user@remote-server
 ## Security Model
 
 - **Admin key**: Required for every WebSocket connection. Share it only with trusted agents.
-- **Session secret**: After connecting, the relay generates an ephemeral per-session secret. All subsequent messages are HMAC-SHA256 signed with it.
+- **Session secret**: After connecting, the relay generates an ephemeral per-session secret. All subsequent messages are HMAC-SHA256 signed with it. The signature covers the full envelope: `id`, `from`, `to`, `method`, `timestamp`, and `params` — preventing tampering with routing metadata.
 - **Nothing persisted**: Session secrets live in memory only. Relay restart invalidates all sessions — agents reconnect automatically with the admin key.
 - **Transport**: Use `wss://` for production. `ws://` is only safe on localhost.
 
@@ -286,20 +290,29 @@ Agent A sends message
   → Bridge B writes to inbox + notifications file
   → Bridge B emits internal event
 
-If Bridge B is in wait_for_messages:
-  → Event resolves the blocking call instantly
-  → Claude Code B sees the message, acts on it
+Channel push mode (Claude Code, OMP pi-channels):
+  → Bridge B sends notifications/claude/channel
+  → Agent sees message instantly in conversation
+  → No polling needed
 
-If Bridge B is NOT in wait_for_messages:
-  → Message queued in pendingNotifications
-  → Next tool call (any tool) includes the notification in response
-  → CronCreate fires within 2 minutes, calls check_messages (non-blocking)
+IRC poll mode (OMP default):
+  → Background task subagent blocked on get_messages(max_wait: 300)
+  → Event resolves the blocking call instantly
+  → Subagent forwards message to main thread via irc
+
+Poll mode (Cursor, Codex):
+  → Agent calls get_messages between tasks
+  → Returns immediately if no messages, or blocks up to max_wait seconds
 ```
 
 ## Troubleshooting
 
-**Bridge not showing in `/mcp`:**
-- Check `~/.claude.json` has the correct path to `agent-protocol-bridge.mjs`
+**Bridge not showing in MCP list:**
+- Claude Code: Check `~/.claude.json` has the correct path
+- Cursor: Check `~/.cursor/mcp.json`
+- Codex: Check `~/.codex/config.toml` has the `[mcp_servers.agent-protocol]` section
+- OMP: Check `~/.omp/agent/mcp.json`
+- OMP channels: Check `~/.pi-channels.json` and ensure you launched with `omp --channels agent-protocol`
 - Verify the file exists and Node.js can run it: `node /path/to/agent-protocol-bridge.mjs` (should hang waiting for stdin — that's correct, Ctrl+C to stop)
 
 **Connection failed:**
@@ -309,11 +322,12 @@ If Bridge B is NOT in wait_for_messages:
 
 **Messages not arriving:**
 - Both agents must be connected to the same relay with the same admin key
-- Check `list_agents` to see who's connected
-- Verify CronCreate was set up: ask Claude Code "do I have any cron jobs?"
+- Call `list_agents` to see who's connected
 - Call `get_messages` to explicitly check the inbox
-- Check `cat ~/.agent-protocol/notifications` — if the file has content, the bridge received the message but Claude Code hasn't read it yet
+- Check `cat ~/.agent-protocol/notifications` — if the file has content, the bridge received the message but the agent hasn't read it yet
 
-**CronCreate not set up:**
-- If Claude Code didn't set up the poll after connecting, manually tell it:
-  > Set up a cron job: CronCreate with cron "*/2 * * * *" and prompt "call check_messages to check for incoming agent messages"
+**OMP channels not working:**
+- Ensure pi-channels plugin is installed: `omp install npm:pi-channels`
+- Launch with the `--channels` flag: `omp --channels agent-protocol`
+- Run `/channels` in OMP to see active channels
+- Tools appear as `channel_agent-protocol_*`, not `mcp__agent-protocol__*`
