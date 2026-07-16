@@ -24621,8 +24621,9 @@ var StdioServerTransport = class {
 
 // packages/bridge/src/index.js
 import { join as join2 } from "node:path";
-import { appendFileSync, mkdirSync as mkdirSync2 } from "node:fs";
+import { appendFileSync, mkdirSync as mkdirSync2, unlinkSync as unlinkSync2, chmodSync } from "node:fs";
 import { EventEmitter } from "node:events";
+import { createServer as createNetServer } from "node:net";
 
 // packages/bridge/src/inbox.js
 import { writeFileSync, readFileSync, readdirSync, unlinkSync, existsSync, mkdirSync } from "node:fs";
@@ -24941,9 +24942,11 @@ function createToolHandlers(connection2, inbox2, taskTracker2) {
 var AP_DIR = join2(process.env.HOME, ".agent-protocol");
 var INBOX_BASE = join2(AP_DIR, "inbox");
 var NOTIFICATIONS_FILE = join2(AP_DIR, "notifications");
+var OMP_SOCKET_PATH = join2(AP_DIR, "omp.sock");
 var DEBUG = process.env.AGENT_PROTOCOL_DEBUG === "1";
 var DELIVERY_MODE = process.env.AGENT_PROTOCOL_DELIVERY || "channel";
 var USE_CHANNEL = DELIVERY_MODE === "channel" || DELIVERY_MODE === "channel-pi";
+var USE_OMP_SOCKET = DELIVERY_MODE === "omp-socket";
 function log(event, data = {}) {
   if (!DEBUG) return;
   try {
@@ -24968,6 +24971,61 @@ var taskTracker = new TaskTracker();
 var handlers = null;
 var cleanupInterval = null;
 var pendingNotifications = [];
+var ompSocketClients = /* @__PURE__ */ new Set();
+var ompSocketServer = null;
+function startOmpSocketServer() {
+  if (ompSocketServer) return;
+  try {
+    mkdirSync2(AP_DIR, { recursive: true });
+    try {
+      unlinkSync2(OMP_SOCKET_PATH);
+    } catch {
+    }
+    ompSocketServer = createNetServer((socket) => {
+      ompSocketClients.add(socket);
+      log("omp_socket_client_connected", { clients: ompSocketClients.size });
+      socket.on("close", () => {
+        ompSocketClients.delete(socket);
+        log("omp_socket_client_disconnected", { clients: ompSocketClients.size });
+      });
+      socket.on("error", (err) => {
+        log("omp_socket_client_error", { error: err.message });
+        ompSocketClients.delete(socket);
+      });
+    });
+    ompSocketServer.listen(OMP_SOCKET_PATH, () => {
+      try {
+        chmodSync(OMP_SOCKET_PATH, 384);
+      } catch {
+      }
+      log("omp_socket_listening", { path: OMP_SOCKET_PATH });
+    });
+    ompSocketServer.on("error", (err) => {
+      log("omp_socket_server_error", { error: err.message });
+    });
+  } catch (err) {
+    log("omp_socket_start_failed", { error: err.message });
+  }
+}
+function pushToOmpSocket(text, meta = {}) {
+  if (!USE_OMP_SOCKET || ompSocketClients.size === 0) return false;
+  const payload = JSON.stringify({ text, meta, timestamp: (/* @__PURE__ */ new Date()).toISOString() }) + "\n";
+  let delivered = 0;
+  for (const client of ompSocketClients) {
+    try {
+      client.write(payload);
+      delivered++;
+    } catch (err) {
+      log("omp_socket_push_failed", { error: err.message });
+      ompSocketClients.delete(client);
+    }
+  }
+  if (delivered > 0) {
+    log("omp_socket_pushed", { delivered, ...meta });
+    return true;
+  }
+  return false;
+}
 async function doConnect({ relay_url, name, admin_key }) {
   if (connection && connection.isConnected()) {
     await connection.disconnect();
@@ -25089,6 +25147,7 @@ function pushChannel(text, meta = {}) {
 function deliver(text, meta = {}) {
   messageEvents.emit("message");
   if (pushChannel(text, meta)) return;
+  if (pushToOmpSocket(text, meta)) return;
   pendingNotifications.push(text);
   writeNotificationToFile(text);
 }
@@ -25127,6 +25186,16 @@ To list connected agents, use ${toolPrefix}_list_agents.
 To broadcast, use ${toolPrefix}_broadcast.
 
 When you receive a <channel> message, act on it and reply using ${toolPrefix}_update_task with the taskId from the message.]`;
+  }
+  if (mode === "omp-socket") {
+    return `[Connected to agent relay. The agent-protocol-omp extension is active \u2014 messages from other agents will arrive instantly in this session via the socket bridge. No polling or background subagent needed.
+
+To send a message to another agent, use mcp__agent-protocol__send_message.
+To reply to a received task, use mcp__agent-protocol__update_task with the taskId from the message.
+To list connected agents, use mcp__agent-protocol__list_agents.
+To broadcast, use mcp__agent-protocol__broadcast.
+
+When you receive a message, act on it and reply using mcp__agent-protocol__update_task with the taskId from the message.]`;
   }
   if (mode === "irc") {
     return `[SETUP REQUIRED: Spawn a background task subagent to listen for incoming messages. IMPORTANT: Do NOT call get_messages with max_wait on the main thread \u2014 it will block you for minutes.
@@ -25271,5 +25340,8 @@ mcpServer.registerTool("get_connection_status", { description: "Check relay conn
   const text = JSON.stringify({ connected }, null, 2);
   return { content: [{ type: "text", text }] };
 });
+if (USE_OMP_SOCKET) {
+  startOmpSocketServer();
+}
 var transport = new StdioServerTransport();
 await mcpServer.connect(transport);

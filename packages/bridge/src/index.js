@@ -2,8 +2,9 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import { join } from 'node:path';
-import { appendFileSync, mkdirSync } from 'node:fs';
+import { appendFileSync, mkdirSync, unlinkSync, chmodSync } from 'node:fs';
 import { EventEmitter } from 'node:events';
+import { createServer as createNetServer } from 'node:net';
 import { Inbox } from './inbox.js';
 import { TaskTracker } from './tasks.js';
 import { ConnectionManager } from './connection.js';
@@ -12,14 +13,16 @@ import { createToolHandlers } from './tools.js';
 const AP_DIR = join(process.env.HOME, '.agent-protocol');
 const INBOX_BASE = join(AP_DIR, 'inbox');
 const NOTIFICATIONS_FILE = join(AP_DIR, 'notifications');
+const OMP_SOCKET_PATH = join(AP_DIR, 'omp.sock');
 
 const DEBUG = process.env.AGENT_PROTOCOL_DEBUG === '1';
 // Delivery mode: 'channel' (Claude Code), 'channel-pi' (pi with pi-channels),
-// 'poll' (Cursor/Codex), 'irc' (OMP).
+// 'poll' (Cursor/Codex), 'irc' (OMP), 'omp-socket' (OMP with native extension).
 // Controls whether we attempt MCP server-initiated channel push and how the
 // connect tool instructs the agent to listen for incoming messages.
 const DELIVERY_MODE = process.env.AGENT_PROTOCOL_DELIVERY || 'channel';
 const USE_CHANNEL = DELIVERY_MODE === 'channel' || DELIVERY_MODE === 'channel-pi';
+const USE_OMP_SOCKET = DELIVERY_MODE === 'omp-socket';
 function log(event, data = {}) {
   if (!DEBUG) return;
   try {
@@ -48,6 +51,65 @@ let taskTracker = new TaskTracker();
 let handlers = null;
 let cleanupInterval = null;
 const pendingNotifications = [];
+
+// --- OMP socket server (omp-socket delivery mode) ---
+// A Unix domain socket server that the OMP extension connects to.
+// Incoming relay messages are pushed as newline-delimited JSON to all connected
+// OMP extension clients, enabling instant injection into the active session.
+const ompSocketClients = new Set();
+let ompSocketServer = null;
+
+function startOmpSocketServer() {
+  if (ompSocketServer) return;
+  try {
+    mkdirSync(AP_DIR, { recursive: true });
+    // Remove stale socket from a previous run
+    try { unlinkSync(OMP_SOCKET_PATH); } catch {}
+    ompSocketServer = createNetServer((socket) => {
+      ompSocketClients.add(socket);
+      log('omp_socket_client_connected', { clients: ompSocketClients.size });
+      socket.on('close', () => {
+        ompSocketClients.delete(socket);
+        log('omp_socket_client_disconnected', { clients: ompSocketClients.size });
+      });
+      socket.on('error', (err) => {
+        log('omp_socket_client_error', { error: err.message });
+        ompSocketClients.delete(socket);
+      });
+    });
+    ompSocketServer.listen(OMP_SOCKET_PATH, () => {
+      try { chmodSync(OMP_SOCKET_PATH, 0o600); } catch {}
+      log('omp_socket_listening', { path: OMP_SOCKET_PATH });
+    });
+    ompSocketServer.on('error', (err) => {
+      log('omp_socket_server_error', { error: err.message });
+    });
+  } catch (err) {
+    log('omp_socket_start_failed', { error: err.message });
+  }
+}
+
+// Push a message to all connected OMP extension clients as newline-delimited JSON.
+// Returns true if at least one client received it.
+function pushToOmpSocket(text, meta = {}) {
+  if (!USE_OMP_SOCKET || ompSocketClients.size === 0) return false;
+  const payload = JSON.stringify({ text, meta, timestamp: new Date().toISOString() }) + '\n';
+  let delivered = 0;
+  for (const client of ompSocketClients) {
+    try {
+      client.write(payload);
+      delivered++;
+    } catch (err) {
+      log('omp_socket_push_failed', { error: err.message });
+      ompSocketClients.delete(client);
+    }
+  }
+  if (delivered > 0) {
+    log('omp_socket_pushed', { delivered, ...meta });
+    return true;
+  }
+  return false;
+}
 
 async function doConnect({ relay_url, name, admin_key }) {
   if (connection && connection.isConnected()) {
@@ -174,15 +236,17 @@ function pushChannel(text, meta = {}) {
   }
 }
 
-// Delivery: channel push (Claude Code only) → file + pendingNotifications fallback.
-// In channel mode, a successful push reaches the active session immediately and
-// we skip the fallback to avoid double-delivery. In poll/irc mode, pushChannel
-// is a no-op, so every message goes to pendingNotifications (piggybacked onto the
-// next tool result) and the notifications file (drained by PostToolUse hook if
+// Delivery: channel push (Claude Code) → omp-socket push (OMP extension) →
+// file + pendingNotifications fallback. In channel mode, a successful push reaches
+// the active session immediately and we skip the fallback. In omp-socket mode,
+// the push goes to the OMP extension via Unix socket. In poll/irc mode, both push
+// paths are no-ops, so every message goes to pendingNotifications (piggybacked onto
+// the next tool result) and the notifications file (drained by PostToolUse hook if
 // installed). The agent is also instructed at connect time to poll get_messages.
 function deliver(text, meta = {}) {
   messageEvents.emit('message');
   if (pushChannel(text, meta)) return;
+  if (pushToOmpSocket(text, meta)) return;
   pendingNotifications.push(text);
   writeNotificationToFile(text);
 }
@@ -231,6 +295,20 @@ To broadcast, use ${toolPrefix}_broadcast.
 When you receive a <channel> message, act on it and reply using ${toolPrefix}_update_task with the taskId from the message.]`;
   }
 
+
+  if (mode === 'omp-socket') {
+    // OMP with the agent-protocol-omp extension: the extension connects to the
+    // bridge's Unix socket and injects incoming messages into the session via
+    // pi.sendMessage(). No polling or background subagent needed.
+    return `[Connected to agent relay. The agent-protocol-omp extension is active — messages from other agents will arrive instantly in this session via the socket bridge. No polling or background subagent needed.
+
+To send a message to another agent, use mcp__agent-protocol__send_message.
+To reply to a received task, use mcp__agent-protocol__update_task with the taskId from the message.
+To list connected agents, use mcp__agent-protocol__list_agents.
+To broadcast, use mcp__agent-protocol__broadcast.
+
+When you receive a message, act on it and reply using mcp__agent-protocol__update_task with the taskId from the message.]`;
+  }
 
   if (mode === 'irc') {
     return `[SETUP REQUIRED: Spawn a background task subagent to listen for incoming messages. IMPORTANT: Do NOT call get_messages with max_wait on the main thread — it will block you for minutes.
@@ -397,6 +475,12 @@ mcpServer.registerTool('get_connection_status', { description: 'Check relay conn
   const text = JSON.stringify({ connected }, null, 2);
   return { content: [{ type: 'text', text }] };
 });
+
+// Start the OMP socket server if we're in omp-socket delivery mode.
+// The OMP extension connects to this socket to receive pushed messages.
+if (USE_OMP_SOCKET) {
+  startOmpSocketServer();
+}
 
 const transport = new StdioServerTransport();
 await mcpServer.connect(transport);

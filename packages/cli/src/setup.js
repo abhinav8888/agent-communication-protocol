@@ -1,5 +1,5 @@
 import { Command } from 'commander';
-import { copyFileSync, chmodSync, mkdirSync, existsSync, readFileSync, readSync, writeFileSync, renameSync } from 'node:fs';
+import { copyFileSync, chmodSync, mkdirSync, existsSync, readFileSync, readSync, writeFileSync, renameSync, symlinkSync, lstatSync, unlinkSync, cpSync, rmSync } from 'node:fs';
 import { execSync } from 'node:child_process';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -8,6 +8,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(HERE, '..', '..', '..');
 const SRC_BRIDGE = join(REPO_ROOT, 'dist', 'agent-protocol-bridge.mjs');
 const SRC_HOOK = join(REPO_ROOT, 'hooks', 'check-notifications.sh');
+const SRC_OMP_PLUGIN = join(REPO_ROOT, 'omp-plugin');
 
 // --- IDE definitions ---
 // delivery mode is set as AGENT_PROTOCOL_DELIVERY env in the MCP server config.
@@ -34,9 +35,9 @@ const IDES = {
   },
   omp: {
     label: 'Oh My Pi',
-    delivery: 'irc',
+    delivery: 'omp-socket',
     configPath: () => join(process.env.HOME, '.omp', 'agent', 'mcp.json'),
-    hint: 'Restart OMP to pick up the new MCP server.',
+    hint: 'Restart OMP. The agent-protocol-omp extension will auto-connect on session start.',
   },
   pi: {
     label: 'Pi',
@@ -106,7 +107,7 @@ export const setupCommand = new Command('setup')
         'claude-code': () => installClaudeCode({ mcpName: opts.mcpName, bridgePath: bridgeDest, hookPath: hookDest, env }),
         cursor: () => installJsonMcp({ def, mcpName: opts.mcpName, bridgePath: bridgeDest, env }),
         codex: () => installCodex({ mcpName: opts.mcpName, bridgePath: bridgeDest, env }),
-        omp: () => installJsonMcp({ def, mcpName: opts.mcpName, bridgePath: bridgeDest, env }),
+        omp: () => installOmp({ def, mcpName: opts.mcpName, bridgePath: bridgeDest, env }),
         pi: () => installPiChannels({ mcpName: opts.mcpName, bridgePath: bridgeDest, env }),
       };
       writers[ide]();
@@ -163,6 +164,64 @@ function installJsonMcp({ def, mcpName, bridgePath, env }) {
   config.mcpServers[mcpName] = { command: 'node', args: [bridgePath], env };
   writeJsonAtomic(path, config);
   console.error(`[agent-protocol] Updated MCP entry "${mcpName}" in ${path} (${def.label})`);
+}
+
+// --- OMP: JSON mcpServers + extension install ---
+// Writes the MCP server config (same as the generic JSON writer) and
+// installs the agent-protocol-omp extension into ~/.omp/agent/extensions/
+// so OMP discovers it on startup.
+
+function installOmp({ def, mcpName, bridgePath, env }) {
+  // Write MCP config (same as generic JSON writer)
+  const path = def.configPath();
+  mkdirSync(dirname(path), { recursive: true });
+  const config = readJson(path);
+  if (!config.mcpServers) config.mcpServers = {};
+  config.mcpServers[mcpName] = { command: 'node', args: [bridgePath], env };
+  writeJsonAtomic(path, config);
+  console.error(`[agent-protocol] Updated MCP entry "${mcpName}" in ${path} (${def.label})`);
+
+  // Install the OMP extension
+  const extDir = join(process.env.HOME, '.omp', 'agent', 'extensions');
+  const extDest = join(extDir, 'agent-protocol-omp');
+
+  if (!existsSync(SRC_OMP_PLUGIN)) {
+    console.error(`[agent-protocol] OMP plugin source missing: ${SRC_OMP_PLUGIN}`);
+    console.error('[agent-protocol] The extension will not be installed. Clone the repo or copy omp-plugin/ manually.');
+    return;
+  }
+
+  mkdirSync(extDir, { recursive: true });
+
+  // Remove stale symlink/dir if it exists
+  try {
+    if (existsSync(extDest)) {
+      const stat = lstatSync(extDest);
+      if (stat.isSymbolicLink()) {
+        unlinkSync(extDest);
+      } else {
+        // Existing directory — remove and replace
+        rmSync(extDest, { recursive: true, force: true });
+      }
+    }
+  } catch {
+    // If removal fails, try to continue anyway
+  }
+
+  // Symlink the extension so edits to omp-plugin/ are picked up on reload
+  try {
+    symlinkSync(SRC_OMP_PLUGIN, extDest);
+    console.error(`[agent-protocol] Installed extension → ${extDest} (symlink → ${SRC_OMP_PLUGIN})`);
+  } catch {
+    // Symlink failed (e.g. permissions) — fall back to copy
+    try {
+      cpSync(SRC_OMP_PLUGIN, extDest, { recursive: true });
+      console.error(`[agent-protocol] Installed extension → ${extDest} (copy)`);
+    } catch (copyErr) {
+      console.error(`[agent-protocol] Failed to install extension: ${copyErr.message}`);
+      console.error(`[agent-protocol] Copy omp-plugin/ to ${extDest} manually.`);
+    }
+  }
 }
 
 // --- Pi: project-local .pi-channels.json ---

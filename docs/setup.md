@@ -78,7 +78,7 @@ This copies the bridge bundle to `~/.agent-protocol/bin/`, registers the MCP ser
 | `claude-code` | `~/.claude.json` | Channel push (instant) | `claude --dangerously-load-development-channels server:agent-protocol` |
 | `cursor` | `~/.cursor/mcp.json` | Poll | `cursor` |
 | `codex` | `~/.codex/config.toml` | Poll | `codex` |
-| `omp` | `~/.omp/agent/mcp.json` | IRC poll | `omp` |
+| `omp` | `~/.omp/agent/mcp.json` | Socket push (instant) | `omp` (extension auto-installed) |
 | `pi` | `.pi-channels.json` (project dir) | Channel push (instant) | `pi --channels agent-protocol` (from project dir) |
 
 #### Delivery Modes
@@ -90,7 +90,7 @@ This copies the bridge bundle to `~/.agent-protocol/bin/`, registers the MCP ser
 
 **Poll** (Cursor, Codex): No channel push available. The agent polls `get_messages` between tasks. After sending a message, call `get_messages` with `max_wait: 30-60` to listen for the reply.
 
-**IRC poll** (OMP): A background task subagent polls `get_messages(max_wait: 300)` and forwards incoming messages to the main thread via `irc`. Works out of the box, no plugins needed.
+**Socket push** (OMP): A native OMP extension connects to the bridge's Unix domain socket (`~/.agent-protocol/omp.sock`) and injects incoming messages into the session via `pi.sendMessage({ triggerTurn: true })`. Sub-second delivery, no polling, no background subagent. The extension is installed automatically by `setup omp`.
 
 #### Options
 
@@ -154,7 +154,7 @@ You'll see a confirmation with the list of already-connected agents.
 **After connecting**, the bridge provides mode-specific instructions:
 - **Channel push** (Claude Code): Spawns a background subagent that polls `get_messages` and forwards via `SendMessage` to the main thread.
 - **Channel push** (Pi): Messages arrive as `<channel>` tags — no polling or subagent needed.
-- **IRC poll** (OMP): Spawns a background task subagent that polls `get_messages` and forwards via `irc`.
+- **Socket push** (OMP): The agent-protocol-omp extension receives messages via Unix socket and injects them into the session automatically. No polling needed.
 - **Poll** (Cursor/Codex): The agent polls `get_messages` between tasks.
 
 Each session picks its own agent name. Multiple sessions on the same machine can use different names — no conflicts.
@@ -175,7 +175,7 @@ How messages arrive depends on the delivery mode:
 
 **Channel push** (Pi): Messages arrive instantly as `<channel source="agent-protocol">` tags in the session. No polling needed.
 
-**IRC poll** (OMP): The background subagent polls `get_messages(max_wait: 300)`. When a message arrives, the event emitter wakes the poller in sub-second time. The subagent forwards the message to the main thread via `irc`.
+**Socket push** (OMP): The agent-protocol-omp extension receives messages via the bridge's Unix socket and calls `pi.sendMessage({ triggerTurn: true })` to inject them into the session. If the agent is idle, a new turn starts; if streaming, the message interrupts as a steer. Sub-second delivery.
 
 **Poll** (Cursor, Codex): The agent must actively call `get_messages` between tasks. After sending a message, call `get_messages` with `max_wait: 30-60` to listen for the reply.
 
@@ -299,11 +299,11 @@ Channel push mode (Pi with pi-channels):
   → pi-channels injects <channel source="agent-protocol"> tag
   → Agent sees message instantly — no polling or subagent
 
-IRC poll mode (OMP):
-  → Background task subagent blocked on get_messages(max_wait: 300)
-  → Event resolves the blocking call instantly
-  → Subagent forwards message to main thread via irc
-
+Socket push mode (OMP with agent-protocol-omp extension):
+  → Bridge B pushes message to Unix socket (~/.agent-protocol/omp.sock)
+  → OMP extension receives newline-delimited JSON
+  → Extension calls pi.sendMessage({ triggerTurn: true }) to inject into session
+  → Agent sees message instantly — no polling or subagent
 Poll mode (Cursor, Codex):
   → Agent calls get_messages between tasks
   → Returns immediately if no messages, or blocks up to max_wait seconds
@@ -337,7 +337,9 @@ Poll mode (Cursor, Codex):
 - Tools appear as `channel_agent-protocol_*`, not `mcp__agent-protocol__*`
 - `.pi-channels.json` must be in the project directory where pi is launched
 
-**OMP messages not forwarded:**
-- Ensure the background task subagent was spawned (the connect response includes instructions for this)
-- The subagent must discover the `get_messages` MCP tool via `search_tool_bm25` before polling
-- Do not call `get_messages(max_wait)` on the main OMP thread — it will block for minutes
+**OMP messages not arriving:**
+- Run `/ap-status` in the OMP session to check the socket bridge connection
+- Ensure the bridge is running with `AGENT_PROTOCOL_DELIVERY=omp-socket` (check `~/.omp/agent/mcp.json`)
+- Verify the extension is installed: `ls ~/.omp/agent/extensions/agent-protocol-omp/`
+- Check that `~/.agent-protocol/omp.sock` exists (created by the bridge on startup)
+- Re-run `node packages/cli/src/index.js setup omp` to reinstall both the bridge and extension

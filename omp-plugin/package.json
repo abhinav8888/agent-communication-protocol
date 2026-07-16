@@ -1,0 +1,11 @@
+{
+  "name": "agent-protocol-omp",
+  "version": "1.0.0",
+  "type": "module",
+  "devDependencies": {
+    "@types/node": "^22.0.0"
+  },
+  "omp": {
+    "extensions": ["./index.ts"]
+  }
+}
